@@ -1,10 +1,4 @@
-"""
-A2 — Analyste de Poste.
-
-Analyse la fiche de poste et produit une structure de compétences.
-Publie sur le blackboard (profil_competences) — les autres agents
-s'abonnent à ses résultats sans couplage direct.
-"""
+"""A2 — Analyste : extrait le profil de compétences depuis la fiche de poste."""
 
 import json
 import re
@@ -20,7 +14,7 @@ _log = get_logger("A2_analyste")
 
 
 def _inferer_niveau_experience(fiche_poste: str) -> dict:
-    """Détecte le niveau d'expérience attendu sans logique métier spéciale."""
+    """Détecte le niveau d'expérience depuis la fiche."""
     texte = fiche_poste.lower()
     if any(mot in texte for mot in ("alternance", "alternant", "apprentissage", "apprenti")):
         return {
@@ -73,7 +67,7 @@ def _inferer_niveau_experience(fiche_poste: str) -> dict:
 
 
 def _inferer_localisations(fiche_poste: str) -> list[str]:
-    """Extrait les lieux explicitement cités après des marqueurs simples."""
+    """Extrait les lieux cités dans la fiche."""
     pattern = re.compile(
         r"(?:\bà\b|\ba\b|\bsur\b|près de|pres de|proche de|autour de|basé à|base a|localisé à|localise a)\s+"
         r"([A-ZÉÈÀÂÎÔÛÇ][A-Za-zÀ-ÖØ-öø-ÿ' -]{1,45})"
@@ -112,16 +106,15 @@ def analyste_node(state: GraphState) -> dict:
     response = llm.invoke(messages)
     content = response.content.strip()
 
-    # Extraire le JSON de la réponse
+    # extraire JSON de la réponse LLM
     try:
-        # Nettoyer les éventuels backticks markdown
-        if content.startswith("```"):
+        if content.startswith("```"):  # nettoyer backticks markdown
             content = content.split("```")[1]
             if content.startswith("json"):
                 content = content[4:]
         profil = json.loads(content)
     except json.JSONDecodeError:
-        # Fallback : extraction basique si le LLM ne produit pas du JSON valide
+        # fallback si JSON invalide
         profil = {
             "hard_skills": [],
             "soft_skills": [],

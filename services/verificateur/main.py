@@ -7,8 +7,8 @@ app = FastAPI(title="A5 Verificateur", version="1.0")
 
 
 class VerifRequest(BaseModel):
-    candidat_score: dict       # CandidatScore de A4
-    profil_source: dict        # Candidat brut (profil_brut, url, source, nom)
+    candidat_score: dict
+    profil_source: dict
     profil_competences: dict
 
 
@@ -30,4 +30,6 @@ def verifier(body: VerifRequest):
         valides = result.get("candidats_valides", [])
         return {"candidat_valide": valides[0] if valides else None}
     except Exception as e:
+        import traceback, logging
+        logging.getLogger("verificateur").error("Erreur /verifier : %s\n%s", e, traceback.format_exc())
         raise HTTPException(status_code=500, detail=str(e))

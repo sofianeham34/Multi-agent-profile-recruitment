@@ -1,25 +1,4 @@
-"""
-API Gateway REST — FastAPI.
-
-Expose le SMA de recrutement comme un service HTTP REST :
-    POST /recruter              → lance le pipeline avec une fiche de poste
-    GET  /rapport/{run_id}      → récupère l'état d'un run (rapport + candidats)
-    GET  /runs                  → liste tous les runs
-    GET  /runs/{run_id}/stream  → flux SSE des événements du pipeline (live)
-    POST /runs/{run_id}/hitl    → décision humaine pour reprendre un run
-                                  interrompu avant A7 (approve/skip/edit)
-    GET  /metrics               → métriques courantes + derniers exports JSON
-    GET  /rag                   → état de la mémoire vectorielle ChromaDB
-    GET  /health                → vérification de disponibilité
-
-Chaque run est identifié par un UUID. Les résultats et la file d'événements
-sont conservés en mémoire et persistés dans SQLite. Le pipeline tourne dans
-un thread séparé pour ne pas bloquer la boucle asyncio de FastAPI.
-
-Deux runtimes sont supportés :
-    - défaut : LangGraph monolithique (`src.graph`)
-    - microservices : orchestrateur HTTP si `SVC_ORCHESTRATEUR` est défini
-"""
+"""API Gateway REST — FastAPI. Supporte LangGraph et microservices HTTP."""
 
 import asyncio
 import json
@@ -41,31 +20,12 @@ from pydantic import BaseModel
 from src.graph import build_graph
 from src.observabilite import reset_metrics, get_metrics
 
-# ---------------------------------------------------------------------------
-# App FastAPI
-# ---------------------------------------------------------------------------
+app = FastAPI(title="SMA Recrutement — API Gateway", version="1.1.0")
 
-app = FastAPI(
-    title="SMA Recrutement — API Gateway",
-    description=(
-        "API REST exposant le système multi-agents de recrutement. "
-        "Le runtime est LangGraph par défaut, ou microservices HTTP si "
-        "SVC_ORCHESTRATEUR est défini. Supporte le streaming SSE et le "
-        "human-in-the-loop en mode LangGraph."
-    ),
-    version="1.1.0",
-)
-
-# ---------------------------------------------------------------------------
-# Stockage en mémoire des runs (prototype — pas de base de données)
-# ---------------------------------------------------------------------------
-
-# Structure : {run_id: RunInfo}. Les champs préfixés par "_" sont internes
-# et ne sont pas exposés via /rapport.
+# runs en mémoire : {run_id: RunInfo}
 _runs: dict[str, dict] = {}
 
-# Délai max d'attente d'une décision HITL avant abandon du run (secondes).
-_HITL_TIMEOUT = 600
+_HITL_TIMEOUT = 600  # secondes avant abandon HITL
 _LOGS_DIR = Path("logs")
 _CHROMA_DIR = Path("data/chromadb")
 _RUNS_DB_PATH = Path(os.getenv("RUNS_DB_PATH", "data/runs.sqlite"))
@@ -74,24 +34,20 @@ _DB_LOCK = threading.Lock()
 _SVC_ORCHESTRATEUR = os.getenv("SVC_ORCHESTRATEUR", "").rstrip("/")
 
 
-# ---------------------------------------------------------------------------
-# Schémas de requête / réponse
-# ---------------------------------------------------------------------------
-
 class RecruterRequest(BaseModel):
     fiche_poste: str
-    no_interrupt: bool = True   # Par défaut pas d'interrupt via API
+    no_interrupt: bool = True   # HITL désactivé par défaut via API
 
 
 class RecruterResponse(BaseModel):
     run_id: str
-    status: str          # "running"
+    status: str
     message: str
 
 
 class RapportResponse(BaseModel):
     run_id: str
-    status: str          # "running" | "awaiting_hitl" | "done" | "error"
+    status: str
     rapport: Optional[str] = None
     candidats: Optional[list] = None
     started_at: Optional[str] = None
@@ -101,19 +57,11 @@ class RapportResponse(BaseModel):
 
 class HitlDecision(BaseModel):
     action: str                              # "approve" | "skip" | "edit"
-    candidats_retenus: Optional[list] = None  # requis si action=="edit"
+    candidats_retenus: Optional[list] = None
 
-
-# ---------------------------------------------------------------------------
-# Helpers d'événements — poussés par le worker, lus par le flux SSE
-# ---------------------------------------------------------------------------
 
 def _push_event(run_id: str, event_type: str, data: dict) -> None:
-    """Ajoute un événement typé à la file de diffusion du run.
-
-    Thread-safe : `queue.Queue` supporte l'accès multi-thread. Les
-    consommateurs SSE récupèrent les événements par polling non bloquant.
-    """
+    """Pousse un événement dans la file SSE du run."""
     info = _runs.get(run_id)
     if info is None:
         return
@@ -127,7 +75,7 @@ def _push_event(run_id: str, event_type: str, data: dict) -> None:
 
 
 def _close_event_stream(run_id: str) -> None:
-    """Pousse le sentinel None : les flux SSE ouverts sortent de leur boucle."""
+    """Sentinel None pour terminer le flux SSE."""
     info = _runs.get(run_id)
     if info is None:
         return
@@ -136,12 +84,8 @@ def _close_event_stream(run_id: str) -> None:
         q.put(None)
 
 
-# ---------------------------------------------------------------------------
-# Persistance SQLite des runs
-# ---------------------------------------------------------------------------
-
 def _internal_run_fields(info: dict) -> dict:
-    """Champs internes non persistés, recréés à chaque démarrage API."""
+    """Champs internes recréés au démarrage (non persistés)."""
     return {
         "_event_queue": queue.Queue(),
         "_hitl_event": threading.Event(),
@@ -153,7 +97,7 @@ def _internal_run_fields(info: dict) -> dict:
 
 
 def _init_runs_db() -> None:
-    """Crée la table SQLite des runs si nécessaire."""
+    """Crée la table SQLite si elle n'existe pas."""
     _RUNS_DB_PATH.parent.mkdir(parents=True, exist_ok=True)
     with _DB_LOCK, sqlite3.connect(_RUNS_DB_PATH) as conn:
         conn.execute(
@@ -174,7 +118,7 @@ def _init_runs_db() -> None:
 
 
 def _save_run(run_id: str) -> None:
-    """Persiste l'état public d'un run en SQLite."""
+    """Persiste un run en SQLite."""
     info = _runs.get(run_id)
     if info is None:
         return
@@ -211,7 +155,7 @@ def _save_run(run_id: str) -> None:
 
 
 def _load_runs_from_db() -> None:
-    """Recharge les runs persistés au démarrage de l'API."""
+    """Charge les runs SQLite au démarrage."""
     _init_runs_db()
     with _DB_LOCK, sqlite3.connect(_RUNS_DB_PATH) as conn:
         conn.row_factory = sqlite3.Row
@@ -247,18 +191,8 @@ def _load_runs_from_db() -> None:
             _save_run(row["run_id"])
 
 
-# ---------------------------------------------------------------------------
-# Logique d'exécution du pipeline (thread worker)
-# ---------------------------------------------------------------------------
-
 def _run_pipeline(run_id: str, fiche_poste: str, with_interrupt: bool) -> None:
-    """Exécute le pipeline LangGraph dans un thread dédié.
-
-    Chaque événement (entrée/sortie de nœud, score A4, statut HITL) est
-    poussé dans la file du run pour diffusion SSE. Si `with_interrupt` est
-    vrai et que le graphe s'arrête avant A7, le worker bloque sur l'événement
-    `_hitl_event` jusqu'à réception d'une décision via POST /hitl.
-    """
+    """Exécute le pipeline LangGraph dans un thread dédié."""
     from src.logger import get_logger
     log = get_logger("api")
 
@@ -275,7 +209,7 @@ def _run_pipeline(run_id: str, fiche_poste: str, with_interrupt: bool) -> None:
 
         cancel_event: threading.Event = _runs[run_id]["_cancel_event"]
 
-        # --- Première phase : exécution jusqu'à interrupt ou fin ---
+        # première phase : jusqu'à interrupt ou fin
         for event in app_graph.stream(
             {"fiche_poste": fiche_poste},
             config=config,
@@ -290,7 +224,7 @@ def _run_pipeline(run_id: str, fiche_poste: str, with_interrupt: bool) -> None:
                     "summary": _resume_payload(payload),
                 })
 
-        # --- Détection d'un interrupt (présence d'un nœud en attente) ---
+        # détection interrupt HITL
         state = app_graph.get_state(config)
         if with_interrupt and state.next:
             candidats_en_attente = state.values.get("candidats_valides", [])
@@ -306,7 +240,7 @@ def _run_pipeline(run_id: str, fiche_poste: str, with_interrupt: bool) -> None:
                 "next_node": state.next[0] if state.next else None,
             })
 
-            # Attente bloquante de la décision humaine
+            # attente décision humaine
             hitl_event: threading.Event = _runs[run_id]["_hitl_event"]
             got_decision = hitl_event.wait(timeout=_HITL_TIMEOUT)
             if not got_decision:
@@ -318,10 +252,9 @@ def _run_pipeline(run_id: str, fiche_poste: str, with_interrupt: bool) -> None:
             log.info("Run %s : décision HITL reçue : %s", run_id, decision["action"])
             _push_event(run_id, "hitl_decision", {"action": decision["action"]})
 
-            # Application de la décision sur l'état du graphe
+            # application de la décision HITL
             if decision["action"] == "skip":
-                # Marquer tous les candidats invalides → A7 ne contactera personne,
-                # A8 ne les persistera pas (cf. filtre par statut).
+                # skip → invalide tous les candidats
                 modifies = [
                     {**c, "statut": "invalide", "remarques": "Rejeté par HITL"}
                     for c in candidats_en_attente
@@ -331,12 +264,12 @@ def _run_pipeline(run_id: str, fiche_poste: str, with_interrupt: bool) -> None:
                 app_graph.update_state(
                     config, {"candidats_valides": decision.get("candidats_retenus", [])}
                 )
-            # "approve" → on reprend tel quel
+            # approve → reprise telle quelle
 
             _runs[run_id]["status"] = "running"
             _save_run(run_id)
 
-            # --- Reprise du graphe après la décision ---
+            # reprise post-HITL
             for event in app_graph.stream(None, config=config, stream_mode="updates"):
                 if cancel_event.is_set():
                     raise InterruptedError("Run annulé par l'utilisateur.")
@@ -347,7 +280,7 @@ def _run_pipeline(run_id: str, fiche_poste: str, with_interrupt: bool) -> None:
                         "summary": _resume_payload(payload),
                     })
 
-        # --- État final ---
+        # état final
         final_state = app_graph.get_state(config)
         rapport = final_state.values.get("rapport_final", "")
         candidats = final_state.values.get("candidats_valides", [])
@@ -380,7 +313,7 @@ def _run_pipeline(run_id: str, fiche_poste: str, with_interrupt: bool) -> None:
 
 
 def _rapport_microservices(fiche_poste: str, payload: dict) -> str:
-    """Construit un rapport Markdown court depuis la réponse de l'orchestrateur HTTP."""
+    """Construit le rapport Markdown depuis la réponse de l'orchestrateur."""
     valides = payload.get("candidats_valides", [])
     douteux = payload.get("candidats_douteux", [])
     invalides = payload.get("candidats_invalides", [])
@@ -474,14 +407,7 @@ def _rapport_microservices(fiche_poste: str, payload: dict) -> str:
 
 
 def _run_pipeline_microservices(run_id: str, fiche_poste: str, with_interrupt: bool) -> None:
-    """Exécute le pipeline distribué via le microservice orchestrateur HTTP.
-
-    Lance le pipeline en mode non-bloquant (POST /pipeline retourne immédiatement),
-    puis poll GET /pipeline/{run_id}/status toutes les 2 s. Si la pause HITL est
-    activée et que l'orchestrateur passe à "awaiting_hitl", bloque sur l'événement
-    local _hitl_event, puis transmet la décision à l'orchestrateur via
-    POST /hitl/{run_id}.
-    """
+    """Exécute le pipeline via l'orchestrateur HTTP, avec polling statut."""
     from src.logger import get_logger
 
     log = get_logger("api.microservices")
@@ -497,7 +423,7 @@ def _run_pipeline_microservices(run_id: str, fiche_poste: str, with_interrupt: b
         cancel_event: threading.Event = _runs[run_id]["_cancel_event"]
         hitl_event: threading.Event   = _runs[run_id]["_hitl_event"]
 
-        # --- Démarrage non-bloquant ---
+        # démarrage non-bloquant
         with httpx.Client(timeout=30.0) as client:
             r = client.post(
                 f"{_SVC_ORCHESTRATEUR}/pipeline",
@@ -509,13 +435,13 @@ def _run_pipeline_microservices(run_id: str, fiche_poste: str, with_interrupt: b
             )
             r.raise_for_status()
 
-        # --- Polling jusqu'à "done" ou "error" ---
+        # polling jusqu'à done ou error
         payload: dict | None = None
         while payload is None:
             if cancel_event.is_set():
                 raise InterruptedError("Run annulé par l'utilisateur.")
 
-            with httpx.Client(timeout=10.0) as client:
+            with httpx.Client(timeout=60.0) as client:
                 r = client.get(f"{_SVC_ORCHESTRATEUR}/pipeline/{run_id}/status")
                 r.raise_for_status()
                 status_data = r.json()
@@ -523,7 +449,7 @@ def _run_pipeline_microservices(run_id: str, fiche_poste: str, with_interrupt: b
             orch_status = status_data.get("status")
 
             if orch_status == "awaiting_hitl" and _runs[run_id]["status"] != "awaiting_hitl":
-                # Transition locale vers l'état d'attente HITL
+                # pause HITL détectée
                 candidats = status_data.get("candidats_pending", [])
                 _runs[run_id]["status"] = "awaiting_hitl"
                 _runs[run_id]["_candidats_pending_hitl"] = candidats
@@ -536,7 +462,7 @@ def _run_pipeline_microservices(run_id: str, fiche_poste: str, with_interrupt: b
                     "Run %s : pause HITL — %d candidat(s) en attente.", run_id, len(candidats)
                 )
 
-                # Attente bloquante de la décision humaine (via POST /runs/{run_id}/hitl)
+                # attente décision humaine
                 got = hitl_event.wait(timeout=_HITL_TIMEOUT)
                 if not got:
                     raise TimeoutError(
@@ -549,7 +475,7 @@ def _run_pipeline_microservices(run_id: str, fiche_poste: str, with_interrupt: b
                 log.info("Run %s : décision HITL reçue : %s", run_id, decision["action"])
                 _push_event(run_id, "hitl_decision", {"action": decision["action"]})
 
-                # Transmission de la décision à l'orchestrateur
+                # transmission décision à l'orchestrateur
                 with httpx.Client(timeout=10.0) as client:
                     r = client.post(
                         f"{_SVC_ORCHESTRATEUR}/hitl/{run_id}",
@@ -569,10 +495,9 @@ def _run_pipeline_microservices(run_id: str, fiche_poste: str, with_interrupt: b
                 )
 
             else:
-                # "running" : attendre avant le prochain poll
-                time.sleep(2)
+                time.sleep(2)  # attente poll suivant
 
-        # --- Traitement du résultat final ---
+        # traitement résultat final
         for node in (
             "analyste",
             "chercheur_stratege",
@@ -626,11 +551,7 @@ def _run_pipeline_microservices(run_id: str, fiche_poste: str, with_interrupt: b
 
 
 def _run_pipeline_entry(run_id: str, fiche_poste: str, with_interrupt: bool) -> None:
-    """Choisit le runtime selon la configuration.
-
-    Sans SVC_ORCHESTRATEUR : runtime LangGraph monolithique.
-    Avec SVC_ORCHESTRATEUR : runtime microservices HTTP.
-    """
+    """Choisit le runtime : LangGraph ou microservices."""
     if _SVC_ORCHESTRATEUR:
         _run_pipeline_microservices(run_id, fiche_poste, with_interrupt)
     else:
@@ -638,11 +559,7 @@ def _run_pipeline_entry(run_id: str, fiche_poste: str, with_interrupt: bool) -> 
 
 
 def _resume_payload(payload) -> dict:
-    """Résumé court d'un payload de nœud pour l'émission SSE.
-
-    Les payloads bruts peuvent contenir des listes longues ou des textes
-    volumineux ; on ne renvoie qu'un aperçu numérique/textuel par clé.
-    """
+    """Résumé court d'un payload pour l'émission SSE."""
     if not isinstance(payload, dict):
         return {}
     resume = {}
@@ -659,7 +576,7 @@ def _resume_payload(payload) -> dict:
 
 
 def _metrics_snapshot() -> dict:
-    """Retourne un snapshot non destructif des métriques en mémoire."""
+    """Snapshot des métriques en mémoire."""
     metrics = get_metrics()
     started = getattr(metrics, "_debut_run", datetime.now().timestamp())
     return {
@@ -670,7 +587,7 @@ def _metrics_snapshot() -> dict:
 
 
 def _load_metrics_history(limit: int = _METRICS_HISTORY_LIMIT) -> list[dict]:
-    """Charge les derniers exports JSON de métriques depuis logs/."""
+    """Charge les derniers exports JSON depuis logs/."""
     if not _LOGS_DIR.exists():
         return []
 
@@ -688,7 +605,7 @@ def _load_metrics_history(limit: int = _METRICS_HISTORY_LIMIT) -> list[dict]:
 
 
 def _rag_counts() -> dict:
-    """Compte les collections ChromaDB sans initialiser SentenceTransformer."""
+    """Compte les documents ChromaDB sans charger SentenceTransformer."""
     if not _CHROMA_DIR.exists():
         return {
             "available": False,
@@ -724,13 +641,8 @@ def _rag_counts() -> dict:
 _load_runs_from_db()
 
 
-# ---------------------------------------------------------------------------
-# Endpoints
-# ---------------------------------------------------------------------------
-
 @app.get("/health", tags=["Monitoring"])
 async def health() -> JSONResponse:
-    """Vérifie que le service est disponible."""
     runs_total = len(_runs)
     runs_running = sum(
         1 for r in _runs.values() if r["status"] in ("running", "awaiting_hitl")
@@ -747,11 +659,7 @@ async def health() -> JSONResponse:
 async def recruter(
     req: RecruterRequest, background_tasks: BackgroundTasks
 ) -> RecruterResponse:
-    """Lance un nouveau pipeline de recrutement.
-
-    - **fiche_poste** : description du poste à pourvoir
-    - **no_interrupt** : si True (défaut), désactive le human-in-the-loop
-    """
+    """Lance un nouveau pipeline de recrutement."""
     if not req.fiche_poste.strip():
         raise HTTPException(status_code=422, detail="fiche_poste ne peut pas être vide.")
 
@@ -766,7 +674,7 @@ async def recruter(
         "started_at": datetime.now(timezone.utc).isoformat(),
         "finished_at": None,
         "mode_execution": "microservices" if _SVC_ORCHESTRATEUR else "langgraph",
-        # Champs internes pour SSE et HITL
+        # champs internes SSE + HITL
         "_event_queue": queue.Queue(),
         "_hitl_event": threading.Event(),
         "_hitl_decision": {},
@@ -792,7 +700,6 @@ async def recruter(
 
 @app.get("/rapport/{run_id}", response_model=RapportResponse, tags=["Pipeline"])
 async def get_rapport(run_id: str) -> RapportResponse:
-    """Récupère le rapport d'un run de recrutement."""
     if run_id not in _runs:
         raise HTTPException(status_code=404, detail=f"Run '{run_id}' introuvable.")
 
@@ -810,7 +717,6 @@ async def get_rapport(run_id: str) -> RapportResponse:
 
 @app.get("/runs", tags=["Monitoring"])
 async def list_runs() -> JSONResponse:
-    """Liste tous les runs avec leur statut (sans les rapports complets)."""
     summary = [
         {
             "run_id": r["run_id"],
@@ -830,7 +736,6 @@ async def list_runs() -> JSONResponse:
 async def get_metrics_summary(
     limit: int = Query(default=_METRICS_HISTORY_LIMIT, ge=1, le=100),
 ) -> JSONResponse:
-    """Retourne les métriques en mémoire et les derniers exports JSON."""
     return JSONResponse({
         "current": _metrics_snapshot(),
         "history": _load_metrics_history(limit),
@@ -839,7 +744,6 @@ async def get_metrics_summary(
 
 @app.get("/rag", tags=["Monitoring"])
 async def get_rag_summary() -> JSONResponse:
-    """Retourne l'état de la mémoire RAG locale."""
     return JSONResponse(_rag_counts())
 
 
@@ -849,11 +753,6 @@ async def search_rag(
     fiche_poste: Optional[str] = Query(default=None),
     n: int = Query(default=5, ge=1, le=20),
 ) -> JSONResponse:
-    """Recherche des profils similaires dans ChromaDB.
-
-    Cet endpoint initialise SentenceTransformer uniquement sur demande,
-    car le chargement du modèle peut être coûteux.
-    """
     try:
         from src.tools.rag import get_memoire
 
@@ -870,18 +769,7 @@ async def search_rag(
 
 @app.get("/runs/{run_id}/stream", tags=["Pipeline"])
 async def stream_run(run_id: str) -> StreamingResponse:
-    """Flux Server-Sent Events (SSE) des événements du pipeline.
-
-    Événements typés :
-        run_started     — début du pipeline
-        node_completed  — fin d'un nœud du graphe (payload résumé)
-        awaiting_hitl   — interrupt avant A7, candidats en attente
-        hitl_decision   — décision humaine reçue
-        run_done        — pipeline terminé, rapport prêt
-        run_error       — erreur fatale
-
-    Format respecté : `event: <type>\\ndata: <json>\\n\\n`.
-    """
+    """Flux SSE des événements du pipeline."""
     if run_id not in _runs:
         raise HTTPException(status_code=404, detail=f"Run '{run_id}' introuvable.")
 
@@ -891,16 +779,20 @@ async def stream_run(run_id: str) -> StreamingResponse:
         if _runs[run_id]["status"] in ("done", "error") and q.empty():
             yield "event: stream_closed\ndata: {}\n\n"
             return
-        # Petit délai de polling : compromis latence/CPU. 100 ms suffisent
-        # pour une UI temps réel et évitent de saturer un worker.
+        _HEARTBEAT_INTERVAL = 15.0  # heartbeat pour éviter timeout SSE
+        last_heartbeat = asyncio.get_event_loop().time()
         while True:
             try:
                 event = q.get_nowait()
             except queue.Empty:
                 await asyncio.sleep(0.1)
+                now = asyncio.get_event_loop().time()
+                if now - last_heartbeat >= _HEARTBEAT_INTERVAL:
+                    yield ": heartbeat\n\n"
+                    last_heartbeat = now
                 continue
             if event is None:
-                # Sentinel de fin : terminer proprement le flux.
+                # sentinel de fin
                 yield "event: stream_closed\ndata: {}\n\n"
                 break
             yield (
@@ -913,20 +805,14 @@ async def stream_run(run_id: str) -> StreamingResponse:
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",
-            "X-Accel-Buffering": "no",  # désactive le buffering côté proxy nginx
+            "X-Accel-Buffering": "no",  # désactive buffering nginx
         },
     )
 
 
 @app.post("/runs/{run_id}/hitl", tags=["Pipeline"])
 async def submit_hitl(run_id: str, decision: HitlDecision) -> JSONResponse:
-    """Transmet une décision humaine pour reprendre un run interrompu.
-
-    - **action** : `approve` (reprend tel quel), `skip` (ne contacte aucun
-      candidat), `edit` (remplace la liste de candidats validés).
-    - **candidats_retenus** : requis si `action == "edit"`, doit être une
-      liste de candidats au format `CandidatValide`.
-    """
+    """Transmet une décision HITL (approve/skip/edit)."""
     if run_id not in _runs:
         raise HTTPException(status_code=404, detail=f"Run '{run_id}' introuvable.")
 
@@ -977,7 +863,7 @@ async def cancel_run(run_id: str) -> JSONResponse:
         )
 
     info["_cancel_event"].set()
-    # Si en attente HITL, débloquer aussi le thread worker
+    # débloquer aussi si en attente HITL
     if info["status"] == "awaiting_hitl":
         info["_hitl_event"].set()
 

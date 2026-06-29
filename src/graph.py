@@ -1,27 +1,4 @@
-"""
-Construction du graphe LangGraph — cœur du SMA de recrutement.
-
-Architecture :
-    START → orchestrateur → analyste
-          → chercheur_stratege (A3a) → chercheur_collecteur (A3b) → chercheur_filtre (A3c)
-          → deduplicateur
-          → [Send() × N] evaluateur → reduce_scores
-          → [Send() × N] verificateur → reduce_validations
-          → (conditionnel) recruteur | rapport → END
-
-Patterns SMA implémentés :
-    - Superviseur (A1 coordonne via le flux du graphe)
-    - Blackboard (GraphState partagé avec droits d'écriture séparés)
-    - Send/Map-Reduce (A4 et A5 × N instances parallèles)
-    - Validation pair-à-pair (A4 produit → A5 contrôle)
-    - Routage conditionnel (score → A7 / rapport / fin)
-    - Human-in-the-loop (interrupt_before sur A7)
-
-Division A3 (refactor architectural) :
-    A3a Stratège   — LLM génère les requêtes par source
-    A3b Collecteur — collecte DDG + GitHub API, dédup URL
-    A3c Filtre     — filtre bruit algorithmique + scraping
-"""
+"""Graphe LangGraph du SMA de recrutement."""
 
 from langgraph.graph import StateGraph, START, END
 from langgraph.types import Send
@@ -48,18 +25,13 @@ from src.agents.injection_rag import injection_rag_node
 
 
 def route_to_evaluateurs(state: GraphState) -> list[Send]:
-    """Fan-out : envoie chaque profil dédupliqué à une instance d'évaluateur.
-
-    Utilise le pattern Send() de LangGraph pour créer N instances
-    parallèles d'A4. Chaque instance reçoit un state partiel avec
-    un seul candidat + le profil de compétences.
-    """
+    """Fan-out : un Send() par profil vers A4."""
     profils = state.get("profils_dedupliques", [])
     if not profils:
         _log.warning("Aucun profil à évaluer, passage direct à la réduction.")
         return [Send("reduce_scores", {})]
 
-    # Limiter le nombre d'instances parallèles pour éviter de surcharger l'API LLM
+    # limite instances parallèles
     if len(profils) > MAX_PROFILS_PARALLELES:
         _log.warning(
             "%d profils disponibles, limite à %d évaluateurs parallèles (MAX_PROFILS_PARALLELES).",
@@ -67,7 +39,7 @@ def route_to_evaluateurs(state: GraphState) -> list[Send]:
         )
         profils = profils[:MAX_PROFILS_PARALLELES]
 
-    _log.info("Fan-out : envoi de %d profils vers %d évaluateurs parallèles (Send).", len(profils), len(profils))
+    _log.info("Fan-out : %d profils vers évaluateurs.", len(profils))
     return [
         Send("evaluateur", {
             "candidat": candidat,
@@ -98,16 +70,7 @@ def route_to_verificateurs(state: GraphState) -> list[Send]:
 
 
 def route_apres_verification(state: GraphState) -> str:
-    """Routage conditionnel après vérification par A5.
-
-    Routage absolu :
-    - meilleur score >= SCORE_SEUIL_CONTACT → recruteur (A7 contacte)
-
-    Routage relatif :
-    - si aucun >= seuil mais au moins 1 >= SCORE_SEUIL_VIABLE → recruteur
-      avec les TOP_N_RELATIF meilleurs (signalés comme "relatif")
-    - sinon → rapport (aucun candidat viable)
-    """
+    """Routage conditionnel après A5 : recruteur ou rapport."""
     candidats_valides = [
         c for c in state.get("candidats_valides", [])
         if c.get("statut") == "valide"
@@ -125,7 +88,7 @@ def route_apres_verification(state: GraphState) -> str:
         get_metrics().noter("routage", decision="recruteur", mode="absolu", meilleur_score=meilleur_score)
         return "recruteur"
 
-    # Routage relatif : prendre les TOP_N meilleurs si au moins un est viable
+    # routage relatif : top-N si au moins un viable
     viables = [c for c in candidats_valides if c["score_final"] >= SCORE_SEUIL_VIABLE]
     if viables:
         top = sorted(viables, key=lambda x: x["score_final"], reverse=True)[:TOP_N_RELATIF]
@@ -143,26 +106,14 @@ def route_apres_verification(state: GraphState) -> str:
 
 
 def build_graph(with_interrupt: bool = True) -> StateGraph:
-    """Construit et compile le graphe du SMA de recrutement.
-
-    Args:
-        with_interrupt: Si True, ajoute interrupt_before sur le nœud
-                       recruteur pour le human-in-the-loop.
-
-    Returns:
-        Le graphe compilé prêt à être invoqué.
-    """
+    """Construit et compile le graphe."""
     graph = StateGraph(GraphState)
 
-    # --- Ajout des nœuds ---
     graph.add_node("orchestrateur", orchestrateur_node)
     graph.add_node("analyste", analyste_node)
-
-    # A3 divisé en 3 nœuds spécialisés
-    graph.add_node("chercheur_stratege", stratege_node)       # A3a : LLM → requêtes
-    graph.add_node("chercheur_collecteur", collecteur_node)   # A3b : DDG + GitHub API
-    graph.add_node("chercheur_filtre", filtre_node)           # A3c : filtre + scraping
-
+    graph.add_node("chercheur_stratege", stratege_node)       # A3a : requêtes
+    graph.add_node("chercheur_collecteur", collecteur_node)   # A3b : collecte
+    graph.add_node("chercheur_filtre", filtre_node)           # A3c : filtrage
     graph.add_node("deduplicateur", deduplicateur_node)
     graph.add_node("evaluateur", evaluateur_node)
     graph.add_node("reduce_scores", reduce_scores_node)
@@ -171,42 +122,35 @@ def build_graph(with_interrupt: bool = True) -> StateGraph:
     graph.add_node("injection_rag", injection_rag_node)
     graph.add_node("recruteur", recruteur_node)
     graph.add_node("rapport", rapport_node)
-    graph.add_node("persistance", persistance_node)  # A8 — mémoire RAG
+    graph.add_node("persistance", persistance_node)
 
-    # --- Arêtes séquentielles (pipeline principal) ---
+    # pipeline séquentiel
     graph.add_edge(START, "orchestrateur")
     graph.add_edge("orchestrateur", "analyste")
-
-    # Pipeline A3 : stratege → collecteur → filtre
     graph.add_edge("analyste", "chercheur_stratege")
     graph.add_edge("chercheur_stratege", "chercheur_collecteur")
     graph.add_edge("chercheur_collecteur", "chercheur_filtre")
     graph.add_edge("chercheur_filtre", "deduplicateur")
 
-    # --- Fan-out : deduplicateur → N × évaluateur via Send() ---
+    # fan-out parallèle A4
     graph.add_conditional_edges(
         "deduplicateur",
         route_to_evaluateurs,
         ["evaluateur", "reduce_scores"]
     )
-
-    # --- Fan-in : évaluateur → reduce_scores (synchronisation) ---
     graph.add_edge("evaluateur", "reduce_scores")
 
-    # --- Fan-out : reduce_scores → N × vérificateur via Send() ---
+    # fan-out parallèle A5
     graph.add_conditional_edges(
         "reduce_scores",
         route_to_verificateurs,
         ["verificateur", "reduce_validations"]
     )
-
-    # --- Fan-in : vérificateur → reduce_validations ---
     graph.add_edge("verificateur", "reduce_validations")
 
-    # --- Injection RAG : candidats connus des runs précédents ---
     graph.add_edge("reduce_validations", "injection_rag")
 
-    # --- Routage conditionnel après vérification + injection ---
+    # routage conditionnel
     graph.add_conditional_edges(
         "injection_rag",
         route_apres_verification,
@@ -216,12 +160,10 @@ def build_graph(with_interrupt: bool = True) -> StateGraph:
         }
     )
 
-    # --- Recruteur → rapport → persistance RAG → fin ---
     graph.add_edge("recruteur", "rapport")
     graph.add_edge("rapport", "persistance")
     graph.add_edge("persistance", END)
 
-    # --- Compilation avec checkpointer ---
     memory = MemorySaver()
 
     compile_kwargs = {"checkpointer": memory}

@@ -31,4 +31,6 @@ def evaluer(body: EvalRequest):
         scores = result.get("candidats_scores", [])
         return {"candidat_score": scores[0] if scores else None}
     except Exception as e:
+        import traceback, logging
+        logging.getLogger("evaluateur").error("Erreur /evaluer : %s\n%s", e, traceback.format_exc())
         raise HTTPException(status_code=500, detail=str(e))
