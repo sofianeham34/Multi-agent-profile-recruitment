@@ -38,4 +38,6 @@ def chercher(body: ProfilCompetences):
             "resultats_bruts_count": len(state.get("resultats_bruts", [])),
         }
     except Exception as e:
+        import traceback, logging
+        logging.getLogger("chercheur").error("Erreur /chercher : %s\n%s", e, traceback.format_exc())
         raise HTTPException(status_code=500, detail=str(e))

@@ -34,10 +34,11 @@ SVC_RECRUTEUR    = os.getenv("SVC_RECRUTEUR",    "http://svc-recruteur:8005")
 SCORE_SEUIL_CONTACT = int(os.getenv("SCORE_SEUIL_CONTACT", "75"))
 SCORE_SEUIL_VIABLE  = int(os.getenv("SCORE_SEUIL_VIABLE",  "40"))
 TOP_N_RELATIF       = int(os.getenv("TOP_N_RELATIF", "3"))
-TIMEOUT      = 120.0
-HITL_TIMEOUT = 600  # secondes avant abandon si aucune décision humaine
+TIMEOUT         = 120.0
+TIMEOUT_CHERCHEUR = 300.0
+HITL_TIMEOUT = 600
 
-# État des runs en cours (en mémoire — prototype ; nettoyé au redémarrage)
+
 _active_runs: dict[str, dict] = {}
 
 
@@ -52,8 +53,8 @@ class PipelineRequest(BaseModel):
 
 
 class HitlDecision(BaseModel):
-    action: str                              # "approve" | "skip" | "edit"
-    candidats_retenus: Optional[list] = None  # requis si action == "edit"
+    action: str
+    candidats_retenus: Optional[list] = None
 
 
 # ---------------------------------------------------------------------------
@@ -131,7 +132,7 @@ async def _run_pipeline_bg(run_id: str, body: PipelineRequest) -> None:
             r = await client.post(
                 f"{SVC_CHERCHEUR}/chercher",
                 json={"profil_competences": profil_competences, "fiche_poste": body.fiche_poste},
-                timeout=TIMEOUT,
+                timeout=TIMEOUT_CHERCHEUR,
             )
             r.raise_for_status()
             chercheur_payload = r.json()

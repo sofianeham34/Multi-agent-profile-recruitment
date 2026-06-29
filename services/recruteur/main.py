@@ -30,4 +30,6 @@ def recruter(body: RecrutRequest):
         result = recruteur_node(state)
         return {"messages_envoyes": result.get("messages_envoyes", [])}
     except Exception as e:
+        import traceback, logging
+        logging.getLogger("recruteur").error("Erreur /recruter : %s\n%s", e, traceback.format_exc())
         raise HTTPException(status_code=500, detail=str(e))

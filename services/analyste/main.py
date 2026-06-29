@@ -22,4 +22,6 @@ def analyser(body: FichePoste):
         result = analyste_node({"fiche_poste": body.fiche_poste, "messages": []})
         return {"profil_competences": result["profil_competences"]}
     except Exception as e:
+        import traceback, logging
+        logging.getLogger("analyste").error("Erreur /analyser : %s\n%s", e, traceback.format_exc())
         raise HTTPException(status_code=500, detail=str(e))

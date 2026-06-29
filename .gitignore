@@ -3,6 +3,7 @@ __pycache__/
 *.pyc
 *.pyo
 .env
+.env.save
 .claude/
 .codex
 logs/
@@ -11,3 +12,9 @@ data/
 dist/
 build/
 .DS_Store
+.idea/
+.pytest_cache/
+*.pdf
+*.numbers
+*.csv
+Etudes/

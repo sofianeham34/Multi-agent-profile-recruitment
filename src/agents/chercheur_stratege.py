@@ -1,20 +1,4 @@
-"""
-A3a — Stratège de Recherche.
-
-Reçoit le profil de compétences extrait par A2 et produit un plan
-de recherche structuré : requêtes optimisées par source (web général,
-LinkedIn, GitHub, sites CV).
-
-Responsabilité unique : décision cognitive (LLM) sur QUOI chercher.
-La collecte (COMMENT) est déléguée à A3b, le filtrage (QUOI garder) à A3c.
-
-Output :
-    requetes_recherche : dict avec les clés :
-        - queries_generales  : list[str]  — requêtes web générales (CV, portfolios)
-        - queries_linkedin   : list[str]  — requêtes LinkedIn (site:linkedin.com/in)
-        - queries_github     : list[str]  — requêtes GitHub Search API (operators natifs)
-        - queries_cv_sites   : list[str]  — requêtes sur malt.fr, doyoubuzz.com, etc.
-"""
+"""A3a — Stratège : génère les requêtes de recherche par source (LLM)."""
 
 import json
 
@@ -134,7 +118,7 @@ def _followers_min(profil: dict) -> str:
 
 
 def _requetes_operateurs(profil: dict) -> dict:
-    """Ajoute des requêtes opérateurs fiables en complément du LLM."""
+    """Requêtes opérateurs en complément du LLM."""
     skills = _termes_competences(profil)
     lieu = _lieu_principal(profil)
     lieu_ddg = _quote(lieu) if lieu else ""
@@ -168,7 +152,7 @@ def _requetes_operateurs(profil: dict) -> dict:
 
 
 def _termes_experience(profil: dict) -> tuple[str, str]:
-    """Retourne les termes à ajouter aux requêtes et les exclusions associées."""
+    """Termes et exclusions selon le niveau d'expérience."""
     niveau = profil.get("niveau_experience", profil.get("niveau_seniorite", "indifferent"))
     contrat = profil.get("type_contrat", "indifferent")
     if niveau == "alternant":

@@ -1,174 +1,154 @@
-# Système Multi-Agents de Recrutement Automatisé
+# Automated Recruitment Multi-Agent System
 
-Prototype développé dans le cadre du TER Master 1 Informatique — Université de Montpellier.
+![Python](https://img.shields.io/badge/Python-3.10+-3776AB?logo=python&logoColor=white)
+![LangGraph](https://img.shields.io/badge/LangGraph-Agentic%20AI-orange)
+![FastAPI](https://img.shields.io/badge/FastAPI-REST%20API-009688?logo=fastapi&logoColor=white)
+![Docker](https://img.shields.io/badge/Docker-Microservices-2496ED?logo=docker&logoColor=white)
+![Tests](https://img.shields.io/badge/Tests-97%20automated-brightgreen)
 
-Sujet : **Architectures Logicielles pour l'IA Agentique — Systèmes Multi-Agents, Variabilité Architecturale et Prototype de Recrutement Automatisé**
+Système multi-agents (SMA) basé sur l'IA agentique pour automatiser la recherche et le contact de candidats développeurs. À partir d'une simple fiche de poste, le pipeline identifie, évalue et contacte les profils pertinents — avec validation humaine avant tout envoi.
 
-Encadrant : M. Abdelhak-Djamel Seriai  
-Auteurs : Sofiane Hammar, Anouar Soufyani, Souad Hadji
-
----
-
-## Présentation
-
-Le système prend une fiche de poste en entrée et exécute automatiquement :
-1. Extraction du profil de compétences recherché (A2)
-2. Recherche de candidats sur DuckDuckGo, GitHub et Stack Overflow (A3)
-3. Déduplication et filtrage anti-bruit (A3c, A6)
-4. Évaluation et scoring de chaque candidat par LLM (A4, parallèle)
-5. Vérification indépendante des scores (A5, parallèle)
-6. Injection de candidats connus depuis la mémoire RAG
-7. Validation humaine obligatoire avant tout contact (HITL)
-8. Rédaction de messages de contact (A7)
-9. Persistance en mémoire vectorielle pour les runs suivants (A8)
+> TER Master 1 Informatique — Université de Montpellier  
+> Auteurs : Sofiane Hammar, Anouar Soufyani, Souad Hadji  
+> Encadrant : M. Abdelhak-Djamel Seriai
 
 ---
 
-## Lancement
+## Fonctionnalités
 
-### Prérequis
-
-- Docker installé, ou Python 3.11+ avec `pip`
-- Une clé API [Groq](https://console.groq.com) (gratuite, sans CB)
-
-```bash
-cp .env.example .env
-# Renseigner GROQ_API_KEY=gsk_... dans .env
-```
-
-### Mode LangGraph monolithique (recommandé)
-
-```bash
-docker compose up --build
-```
-
-Ou sans Docker :
-
-```bash
-python -m venv venv && source venv/bin/activate
-pip install -r requirements.txt
-./run_local.sh
-```
-
-### Mode microservices Docker
-
-```bash
-docker compose -f docker-compose.microservices.yml up --build
-```
-
-### Accès
-
-| Service | URL |
-|---|---|
-| Interface web | http://localhost:8080 |
-| API REST | http://localhost:8000 |
-| Documentation API | http://localhost:8000/docs |
+- **Pipeline entièrement automatisé** : de la fiche de poste au rapport final
+- **8 agents spécialisés** orchestrés par LangGraph avec parallélisation fan-out
+- **Multi-sources** : GitHub, DuckDuckGo, Stack Overflow
+- **RAG (mémoire vectorielle)** : historique des candidats via ChromaDB
+- **Human-in-the-loop** : validation humaine avant contact des candidats
+- **Double déploiement** : mode local LangGraph ou microservices Docker
+- **97 tests automatisés** (pytest)
 
 ---
 
 ## Architecture
 
-Le pipeline est un graphe LangGraph de 10 agents :
-
 ```
-START → A1 → A2 → A3a → A3b → A3c → A6
-                                      └─► [Send × N] A4 → reduce
-                                                           └─► [Send × N] A5 → reduce
-                                                                                └─► injection_rag
-                                                                                      ├─► A7 → rapport → A8 → END
-                                                                                      └─► rapport → A8 → END
+Fiche de poste
+      │
+      ▼
+[A1] Orchestrateur
+      │
+      ▼
+[A2] Analyste ──── Profil de compétences
+      │
+      ▼
+[A3a] Chercheur Stratège ──── Requêtes ciblées
+      │
+      ▼
+[A3b] Chercheur Collecteur ──── GitHub · DuckDuckGo · Stack Overflow
+      │
+      ▼
+[A3c] Chercheur Filtre
+      │
+      ▼
+[A6] Déduplicateur
+      │
+      ├──── [A4] Évaluateur  ┐
+      ├──── [A4] Évaluateur  ├── fan-out parallèle (1 par candidat)
+      └──── [A4] Évaluateur  ┘
+                │
+      ┌─────────┘
+      ├──── [A5] Vérificateur ┐
+      └──── [A5] Vérificateur ┘
+                │
+         ── validation humaine ──
+                │
+                ▼
+      [A7] Recruteur ──── Messages personnalisés
+                │
+                ▼
+      [A8] Persistance ──── ChromaDB (RAG)
+                │
+                ▼
+          Rapport final
 ```
-
-**Deux modes d'exécution :**
-- **LangGraph monolithique** : graphe d'état typé, HITL natif (`interrupt_before`), fan-out parallèle via `Send()`, checkpointing `MemorySaver`
-- **Microservices Docker** : 6 services FastAPI indépendants orchestrés via HTTP, HITL via `asyncio.Event` + polling
-
----
-
-## Fonctionnalités principales
-
-### Mémoire RAG (ChromaDB)
-- **Cache de score** : évite de réévaluer un candidat déjà scoré (A4)
-- **Injection proactive** : réinjecte les candidats validés lors de runs précédents
-- **Blacklist** : exclut les profils déjà rejetés de la collecte (A3c)
-
-### Human-in-the-Loop (HITL)
-Pause obligatoire avant A7 : l'opérateur peut approuver, rejeter ou modifier la liste des candidats retenus avant tout message de contact.
-
-### Observabilité
-- Métriques par nœud exportées en JSON (`logs/`)
-- Historique des runs en SQLite (`data/runs.sqlite`)
-- Interface web avec timeline live (SSE)
 
 ---
 
 ## Stack technique
 
-| Composant | Technologie |
+| Couche | Technologies |
 |---|---|
-| Orchestration agents | LangGraph |
-| LLM | Groq `llama-3.3-70b-versatile` |
-| Recherche web | DuckDuckGo (ddgs) |
-| Recherche profils | GitHub Search Users API + Stack Exchange API |
-| Mémoire vectorielle | ChromaDB + SentenceTransformers |
-| API REST | FastAPI + Uvicorn |
-| Interface graphique | NiceGUI |
-| Conteneurisation | Docker Compose |
+| Orchestration agents | LangGraph, LangChain |
+| LLM | Groq API — LLaMA 3.3 70B / 3.1 8B |
+| API REST | FastAPI |
+| Mémoire vectorielle | ChromaDB (RAG) |
+| Sources candidats | GitHub API, DuckDuckGo, Stack Overflow API |
+| Interface utilisateur | Web UI (port 8080) |
+| Déploiement | Docker Compose — monolithique ou microservices |
+| Tests | pytest — 97 tests |
 
 ---
 
-## Variables d'environnement
+## Installation
 
-| Variable | Défaut | Description |
-|---|---|---|
-| `GROQ_API_KEY` | *(obligatoire)* | Clé API Groq |
-| `LLM_MODEL` | `llama-3.3-70b-versatile` | Modèle Groq |
-| `SCORE_SEUIL_CONTACT` | `75` | Score minimum pour contacter un candidat |
-| `SCORE_SEUIL_VIABLE` | `40` | Score minimum mode relatif |
-| `TOP_N_RELATIF` | `3` | Nombre de candidats en mode relatif |
-| `MAX_PROFILS_PARALLELES` | `10` | Évaluateurs parallèles max |
-| `GITHUB_TOKEN` | *(optionnel)* | 5000 req/h au lieu de 60 |
-| `STACKOVERFLOW_KEY` | *(optionnel)* | Clé Stack Exchange API |
-| `CHROMADB_DIR` | `data/chromadb` | Base vectorielle RAG |
-| `RUNS_DB_PATH` | `data/runs.sqlite` | Historique des runs |
+### Prérequis
+- Python 3.10+
+- Clé API Groq gratuite → [console.groq.com](https://console.groq.com)
+
+```bash
+git clone https://github.com/<ton-compte>/TER_M1_Agentic_AI.git
+cd TER_M1_Agentic_AI
+
+cp .env.example .env
+# Renseigner GROQ_API_KEY dans .env
+
+python3 -m venv venv && source venv/bin/activate
+pip install -r requirements.txt
+./run_local.sh
+```
+
+| Service | URL |
+|---|---|
+| Interface web | http://localhost:8080 |
+| API REST | http://localhost:8000 |
+
+### Docker (microservices)
+```bash
+docker compose -f docker-compose.microservices.yml up --build
+```
+
+---
+
+## Utilisation CLI
+
+```bash
+# Fiche de poste en argument direct
+python -m src.main "Développeur Python senior, 5 ans d'expérience, Paris"
+
+# Depuis un fichier
+python -m src.main --fichier fiche_poste.txt
+
+# Sans validation humaine
+python -m src.main --no-interrupt "Data Scientist ML, remote"
+```
 
 ---
 
 ## Tests
 
 ```bash
-source venv/bin/activate
-python -m pytest tests/ -v
+python3 -m pytest tests/ -v
 ```
-
-97 tests automatisés couvrant : routage conditionnel, HITL, RAG, filtre anti-bruit, déduplication, API REST.
 
 ---
 
-## Structure du projet
+## Structure
 
 ```
 src/
-├── agents/
-│   ├── orchestrateur.py        # A1
-│   ├── analyste.py             # A2
-│   ├── chercheur_stratege.py   # A3a
-│   ├── chercheur_collecteur.py # A3b
-│   ├── chercheur_filtre.py     # A3c
-│   ├── deduplicateur.py        # A6
-│   ├── evaluateur.py           # A4
-│   ├── verificateur.py         # A5
-│   ├── recruteur.py            # A7
-│   └── persistance.py          # A8
-├── tools/
-│   ├── search.py               # DuckDuckGo
-│   ├── github_api.py           # GitHub Search API
-│   ├── stackoverflow_api.py    # Stack Exchange API
-│   └── rag.py                  # ChromaDB (MemoireRAG)
-├── api.py                      # API Gateway FastAPI
-├── graph.py                    # Graphe LangGraph
-├── state.py                    # GraphState (blackboard)
-└── config.py                   # Configuration
-services/                       # Mode microservices
-tests/                          # 97 tests automatisés
+├── agents/          # 8 agents spécialisés
+├── tools/           # GitHub API, DuckDuckGo, Stack Overflow, RAG
+├── ui/              # Interface web
+├── graph.py         # Graphe LangGraph
+├── api.py           # API Gateway FastAPI
+└── state.py         # État partagé entre agents
+services/            # Microservices Docker (1 par agent)
+tests/               # 97 tests automatisés
 ```

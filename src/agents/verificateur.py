@@ -298,8 +298,7 @@ def verificateur_node(state: dict) -> dict:
     source = profil_source.get("source", "")
     url = profil_source.get("url", None)
 
-    # Garde-fous déterministes : ils ne remplacent pas A5, ils empêchent A5 de
-    # valider une page non-candidat ou hors compétences malgré un score A4 élevé.
+
     if _profil_non_candidat(nom, profil_brut, url or ""):
         score_final = min(score_final, 20.0)
         statut = "invalide"
