@@ -18,6 +18,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel
 
 from src.graph import build_graph
+from src.config import graph_config
 from src.observabilite import reset_metrics, get_metrics
 
 app = FastAPI(title="SMA Recrutement — API Gateway", version="1.1.0")
@@ -205,7 +206,7 @@ def _run_pipeline(run_id: str, fiche_poste: str, with_interrupt: bool) -> None:
         reset_metrics()
 
         app_graph = build_graph(with_interrupt=with_interrupt)
-        config = {"configurable": {"thread_id": run_id}}
+        config = graph_config(run_id)
 
         cancel_event: threading.Event = _runs[run_id]["_cancel_event"]
 
@@ -605,7 +606,7 @@ def _load_metrics_history(limit: int = _METRICS_HISTORY_LIMIT) -> list[dict]:
 
 
 def _rag_counts() -> dict:
-    """Compte les documents ChromaDB sans charger SentenceTransformer."""
+    """Compte les documents ChromaDB sans charger le modèle d'embedding."""
     if not _CHROMA_DIR.exists():
         return {
             "available": False,

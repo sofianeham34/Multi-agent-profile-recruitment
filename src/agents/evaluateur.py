@@ -7,12 +7,11 @@ N instances traitent N profils simultanément.
 """
 
 import json
-import time
-import random
 from langchain_core.messages import SystemMessage, HumanMessage
 
 from src.state import CandidatScore
 from src.config import get_llm
+from src.llm_json import invoke_json, LLMJsonError
 from src.prompts import EVALUATEUR_SYSTEM
 from src.tools.rag import get_memoire
 from src.observabilite import get_metrics
@@ -99,52 +98,25 @@ Profil :
         HumanMessage(content=eval_msg)
     ]
 
-    # Retry avec backoff pour gérer les limites de requêtes concurrentes
-    for attempt in range(5):
-        try:
-            response = llm.invoke(messages)
-            break
-        except Exception as e:
-            if "429" in str(e) or "too many" in str(e).lower():
-                wait = (2 ** attempt) + random.uniform(0, 1)
-                log.warning("Rate limit pour %s, retry %d/5 dans %.1fs...", candidat['nom'], attempt + 1, wait)
-                time.sleep(wait)
-            else:
-                raise
-    else:
-        # Toutes les tentatives échouées
+    # Les erreurs 429 (limite de débit) sont relancées par get_llm().with_retry.
+    # Si la réponse reste inexploitable, le candidat est marqué en échec avec
+    # un score nul : il ne sera jamais contacté sur la base d'un score inventé.
+    try:
+        scores, response = invoke_json(llm, messages, expected=dict, label=f"A4 {candidat['nom'][:40]}")
+    except LLMJsonError as exc:
+        log.error("Évaluation impossible pour %s : %s", candidat['nom'], exc)
+        m.fin(f"A4_{candidat['id']}", candidat_nom=candidat['nom'], score=0.0, source=candidat['source'], echec=True)
         return {
             "candidats_scores": [CandidatScore(
                 candidat_id=candidat["id"],
                 nom=candidat["nom"],
                 score_global=0.0,
-                scores_detail={},
-                resume=f"Évaluation échouée après 5 tentatives pour {candidat['nom']}"
+                scores_detail={"evaluation_echouee": True},
+                resume=f"Évaluation impossible : réponse du LLM inexploitable pour {candidat['nom']}.",
             )]
         }
 
-    content = response.content.strip()
-
-    # Extraire le JSON
-    try:
-        if content.startswith("```"):
-            content = content.split("```")[1]
-            if content.startswith("json"):
-                content = content[4:]
-        scores = json.loads(content)
-    except json.JSONDecodeError:
-        scores = {
-            "score_global": 50.0,
-            "scores_detail": {
-                "hard_skills": 50,
-                "soft_skills": 50,
-                "experience": 50,
-                "culture_fit": 50
-            },
-            "resume": f"Évaluation non parsable pour {candidat['nom']}. Réponse brute: {content[:200]}"
-        }
-
-    score_global = float(scores.get("score_global", 50))
+    score_global = max(0.0, min(100.0, float(scores.get("score_global", 0) or 0)))
     candidat_score = CandidatScore(
         candidat_id=candidat["id"],
         nom=candidat["nom"],

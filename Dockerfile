@@ -2,7 +2,7 @@ FROM python:3.11-slim
 
 WORKDIR /app
 
-# Dépendances système pour BeautifulSoup / lxml / sentence-transformers
+# Dépendances système pour la compilation de certains paquets Python
 RUN apt-get update && apt-get install -y --no-install-recommends \
     gcc \
     && rm -rf /var/lib/apt/lists/*
@@ -20,7 +20,7 @@ RUN mkdir -p logs data/chromadb
 
 # Variables d'environnement par défaut (surchargeables via docker-compose ou CLI)
 ENV LLM_PROVIDER=groq
-ENV LLM_MODEL=llama-3.3-70b-versatile
+ENV LLM_MODEL=openai/gpt-oss-120b
 ENV SCORE_SEUIL_CONTACT=75
 ENV MAX_PROFILS_RECHERCHE=15
 

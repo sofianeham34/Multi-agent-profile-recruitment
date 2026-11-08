@@ -1,9 +1,9 @@
 from src.agents.verificateur import (
     _adequation_minimale,
-    _parse_validation_json,
     _profil_non_candidat,
     _profil_personne_probable,
 )
+from src.llm_json import parse_json
 
 
 def test_pages_non_candidats_detectees_depuis_titre_et_url():
@@ -89,7 +89,7 @@ def test_adequation_minimale_rejette_personne_hors_poste():
 
 
 def test_parse_validation_json_accepte_markdown_et_texte():
-    parsed = _parse_validation_json(
+    parsed = parse_json(
         'Voici le résultat:\n```json\n{"candidat_id":"x","nom":"Alice","score_final":80,"statut":"valide","remarques":"ok"}\n```'
     )
     assert parsed["statut"] == "valide"

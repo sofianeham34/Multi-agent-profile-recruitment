@@ -7,8 +7,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 COPY requirements.microservices.txt .
-# Torch CPU-only d'abord pour eviter les 3 Go de libs CUDA nvidia
-RUN pip install --no-cache-dir torch --index-url https://download.pytorch.org/whl/cpu
 RUN pip install --no-cache-dir -r requirements.microservices.txt
 
 COPY src/ ./src/
@@ -17,4 +15,4 @@ COPY services/ ./services/
 RUN mkdir -p logs data/chromadb
 
 ENV LLM_PROVIDER=groq
-ENV LLM_MODEL=llama-3.3-70b-versatile
+ENV LLM_MODEL=openai/gpt-oss-120b

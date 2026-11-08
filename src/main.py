@@ -12,6 +12,7 @@ import sys
 import uuid
 
 from src.graph import build_graph
+from src.config import graph_config
 from src.observabilite import reset_metrics
 
 
@@ -59,7 +60,7 @@ def main():
     app = build_graph(with_interrupt=with_interrupt)
 
     thread_id = str(uuid.uuid4())
-    config = {"configurable": {"thread_id": thread_id}}
+    config = graph_config(thread_id)
 
     # Lancer le pipeline
     print("\n[Lancement du pipeline multi-agents...]\n")
