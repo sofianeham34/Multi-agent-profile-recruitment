@@ -4,7 +4,7 @@
 ![LangGraph](https://img.shields.io/badge/LangGraph-Agentic%20AI-orange)
 ![FastAPI](https://img.shields.io/badge/FastAPI-REST%20API-009688?logo=fastapi&logoColor=white)
 ![Docker](https://img.shields.io/badge/Docker-Microservices-2496ED?logo=docker&logoColor=white)
-![Tests](https://img.shields.io/badge/Tests-97%20automated-brightgreen)
+![Tests](https://img.shields.io/badge/Tests-113%20automated-brightgreen)
 
 Système multi-agents (SMA) basé sur l'IA agentique pour automatiser la recherche et le contact de candidats développeurs. À partir d'une simple fiche de poste, le pipeline identifie, évalue et contacte les profils pertinents — avec validation humaine avant tout envoi.
 
@@ -22,7 +22,7 @@ Système multi-agents (SMA) basé sur l'IA agentique pour automatiser la recherc
 - **RAG (mémoire vectorielle)** : historique des candidats via ChromaDB
 - **Human-in-the-loop** : validation humaine avant contact des candidats
 - **Double déploiement** : mode local LangGraph ou microservices Docker
-- **97 tests automatisés** (pytest)
+- **113 tests automatisés** (pytest), dont une exécution complète du pipeline sans réseau
 
 ---
 
@@ -76,13 +76,13 @@ Fiche de poste
 | Couche | Technologies |
 |---|---|
 | Orchestration agents | LangGraph, LangChain |
-| LLM | Groq API — LLaMA 3.3 70B / 3.1 8B |
+| LLM | Groq API — gpt-oss-120b / gpt-oss-20b |
 | API REST | FastAPI |
 | Mémoire vectorielle | ChromaDB (RAG) |
 | Sources candidats | GitHub API, DuckDuckGo, Stack Overflow API |
 | Interface utilisateur | Web UI (port 8080) |
 | Déploiement | Docker Compose — monolithique ou microservices |
-| Tests | pytest — 97 tests |
+| Tests | pytest — 113 tests |
 
 ---
 
@@ -90,16 +90,16 @@ Fiche de poste
 
 ### Prérequis
 - Python 3.10+
-- Clé API Groq gratuite → [console.groq.com](https://console.groq.com)
+- Clé API Groq → [console.groq.com](https://console.groq.com)
 
 ```bash
-git clone https://github.com/<ton-compte>/TER_M1_Agentic_AI.git
-cd TER_M1_Agentic_AI
+git clone https://github.com/sofianeham34/Multi-agent-profile-recruitment.git
+cd Multi-agent-profile-recruitment
 
 cp .env.example .env
 # Renseigner GROQ_API_KEY dans .env
 
-python3 -m venv venv && source venv/bin/activate
+python3 -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
 ./run_local.sh
 ```
@@ -150,5 +150,5 @@ src/
 ├── api.py           # API Gateway FastAPI
 └── state.py         # État partagé entre agents
 services/            # Microservices Docker (1 par agent)
-tests/               # 97 tests automatisés
+tests/               # 113 tests automatisés
 ```

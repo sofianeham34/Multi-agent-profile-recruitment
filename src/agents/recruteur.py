@@ -11,6 +11,7 @@ from langchain_core.messages import SystemMessage, HumanMessage
 
 from src.state import GraphState
 from src.config import get_llm, SCORE_SEUIL_CONTACT, SCORE_SEUIL_VIABLE, TOP_N_RELATIF
+from src.llm_json import invoke_json, LLMJsonError
 from src.prompts import RECRUTEUR_SYSTEM
 from src.observabilite import get_metrics
 from src.logger import get_logger
@@ -81,26 +82,21 @@ Rédige un message de premier contact personnalisé pour chaque candidat."""
         HumanMessage(content=contact_msg)
     ]
 
-    response = llm.invoke(messages)
-    content = response.content.strip()
-
-    # Extraire le JSON
+    response = None
     try:
-        if content.startswith("```"):
-            content = content.split("```")[1]
-            if content.startswith("json"):
-                content = content[4:]
-        messages_contact = json.loads(content)
-        if not isinstance(messages_contact, list):
-            messages_contact = [messages_contact]
-    except json.JSONDecodeError:
+        messages_contact, response = invoke_json(llm, messages, expected=list, label="A7 recruteur")
+    except LLMJsonError:
+        # Repli : message générique propre (jamais la réponse brute du modèle)
         messages_contact = [
             {
                 "candidat_id": c["candidat_id"],
                 "nom": c["nom"],
-                "objet": f"Opportunité - {c['nom']}",
-                "message": content[:500],
-                "canal": "email"
+                "objet": "Opportunité qui pourrait vous intéresser",
+                "message": (
+                    f"Bonjour {c['nom']},\n\nVotre parcours correspond à un poste que nous cherchons "
+                    "à pourvoir. Seriez-vous disponible pour un premier échange ?\n\nCordialement"
+                ),
+                "canal": "email",
             }
             for c in top_candidats
         ]
@@ -112,5 +108,5 @@ Rédige un message de premier contact personnalisé pour chaque candidat."""
 
     return {
         "messages_envoyes": messages_contact,
-        "messages": [response]
+        "messages": [response] if response is not None else []
     }

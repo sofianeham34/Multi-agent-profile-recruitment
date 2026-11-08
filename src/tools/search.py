@@ -8,6 +8,7 @@ Deux niveaux d'API :
       conservés pour compatibilité si un agent veut utiliser bind_tools.
 """
 
+import time
 from ddgs import DDGS
 
 
@@ -58,12 +59,21 @@ def _ddg_search_raw(
     parts.append(DDG_EXCLUSIONS)
     final_query = " ".join(parts)
 
-    try:
-        with DDGS() as ddgs:
-            results = list(ddgs.text(final_query, max_results=max_results))
-    except Exception as e:
-        from src.logger import get_logger
-        get_logger("tools.search").warning("Erreur DDG pour '%s...': %s", query[:50], e)
+    # Quelques nouvelles tentatives : le moteur coupe parfois la connexion
+    # ou limite le débit de façon temporaire.
+    results = None
+    for tentative in range(3):
+        try:
+            with DDGS() as ddgs:
+                results = list(ddgs.text(final_query, max_results=max_results))
+            break
+        except Exception as e:
+            from src.logger import get_logger
+            get_logger("tools.search").warning(
+                "Erreur DDG pour '%s...' (tentative %d/3) : %s", query[:50], tentative + 1, e
+            )
+            time.sleep(2 * (tentative + 1))
+    if results is None:
         return []
 
     hits = []

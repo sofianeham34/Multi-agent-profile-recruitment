@@ -18,7 +18,8 @@ def _valide(nom="Alice", score=80.0, statut="valide") -> CandidatValide:
 
 class TestStructureGraphe:
     @pytest.fixture(scope="class")
-    def app(self):
+    @classmethod
+    def app(cls):
         return build_graph(with_interrupt=False)
 
     def test_noeuds_presents(self, app):

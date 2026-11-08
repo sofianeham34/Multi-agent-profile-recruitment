@@ -1,11 +1,11 @@
 """A3a — Stratège : génère les requêtes de recherche par source (LLM)."""
 
-import json
 
 from langchain_core.messages import SystemMessage, HumanMessage
 
 from src.state import GraphState
 from src.config import get_llm
+from src.llm_json import invoke_json, LLMJsonError
 from src.observabilite import get_metrics
 from src.logger import get_logger
 
@@ -230,19 +230,14 @@ def stratege_node(state: GraphState) -> dict:
         f"Mots-clés : {', '.join(profil.get('mots_cles', []))}"
     )
 
-    response = llm.invoke([
+    messages = [
         SystemMessage(content=_STRATEGE_PROMPT),
         HumanMessage(content=recherche_msg),
-    ])
-    content = response.content.strip()
-
+    ]
+    response = None
     try:
-        if content.startswith("```"):
-            content = content.split("```")[1]
-            if content.startswith("json"):
-                content = content[4:]
-        requetes = json.loads(content)
-    except json.JSONDecodeError:
+        requetes, response = invoke_json(llm, messages, expected=dict, label="A3a stratège")
+    except LLMJsonError:
         # Fallback : requêtes génériques à partir des mots-clés
         mots = profil.get("mots_cles", profil.get("hard_skills", ["développeur"]))
         base = " ".join(mots[:5])
@@ -275,5 +270,5 @@ def stratege_node(state: GraphState) -> dict:
 
     return {
         "requetes_recherche": requetes,
-        "messages": [response],
+        "messages": [response] if response is not None else [],
     }

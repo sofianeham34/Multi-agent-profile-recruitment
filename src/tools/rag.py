@@ -1,8 +1,8 @@
 """
 Mémoire RAG — Stockage vectoriel des candidats évalués, calibré par fiche de poste.
 
-Utilise ChromaDB (local, gratuit, aucun serveur requis) avec
-SentenceTransformers pour les embeddings (all-MiniLM-L6-v2, ~80 MB).
+Utilise ChromaDB (local, aucun serveur requis) avec son modèle d'embedding
+intégré all-MiniLM-L6-v2 (version ONNX, ~80 MB, sans PyTorch).
 
 Deux collections :
     - fiches_poste       : embeddings des fiches de poste passées
@@ -25,7 +25,7 @@ import hashlib
 import os
 import time
 import chromadb
-from chromadb.utils.embedding_functions import SentenceTransformerEmbeddingFunction
+from chromadb.utils.embedding_functions import DefaultEmbeddingFunction
 from src.logger import get_logger
 
 _log = get_logger("tools.rag")
@@ -33,7 +33,6 @@ _log = get_logger("tools.rag")
 _PERSIST_DIR = os.getenv("CHROMADB_DIR", "./data/chromadb")
 _CANDIDATS_COLLECTION = "candidats_evalues"
 _FICHES_COLLECTION = "fiches_poste"
-_EMBED_MODEL = "all-MiniLM-L6-v2"   # ~80 MB, téléchargé une seule fois
 
 # Seuil de similarité fiche↔fiche au-dessus duquel on considère qu'une fiche
 # stockée est suffisamment proche de la fiche courante pour que ses candidats
@@ -57,7 +56,6 @@ class MemoireRAG:
     def __init__(self, persist_dir: str = _PERSIST_DIR):
         os.makedirs(persist_dir, exist_ok=True)
         self._client = chromadb.PersistentClient(path=persist_dir)
-        self._ef = None
         self._candidats = self._open_collection(_CANDIDATS_COLLECTION)
         self._fiches = self._open_collection(_FICHES_COLLECTION)
         _log.info(
@@ -66,37 +64,16 @@ class MemoireRAG:
         )
 
     def _open_collection(self, name: str):
-        """Ouvre une collection avec SentenceTransformer, ou réutilise
-        l'embedding function persistée si la base existe déjà.
+        """Ouvre (ou crée) une collection en similarité cosine.
 
-        ChromaDB persiste la configuration d'embedding. Une base créée avec
-        l'embedding par défaut refuse ensuite `SentenceTransformer`, ce qui
-        ne doit pas bloquer le pipeline : dans ce cas, on garde l'existant.
+        L'embedding all-MiniLM-L6-v2 est celui intégré à ChromaDB (ONNX) :
+        téléchargé une seule fois, il tourne sur CPU sans dépendre de PyTorch.
         """
-        try:
-            return self._client.get_collection(name)
-        except Exception:
-            pass
-
-        if self._ef is None:
-            self._ef = SentenceTransformerEmbeddingFunction(model_name=_EMBED_MODEL)
-
-        try:
-            return self._client.get_or_create_collection(
-                name=name,
-                embedding_function=self._ef,
-                metadata={"hnsw:space": "cosine"},
-            )
-        except Exception as exc:
-            message = str(exc).lower()
-            if "embedding function conflict" not in message:
-                raise
-            _log.warning(
-                "Collection ChromaDB '%s' déjà créée avec une autre embedding function ; "
-                "réouverture avec sa configuration persistée.",
-                name,
-            )
-            return self._client.get_collection(name)
+        return self._client.get_or_create_collection(
+            name=name,
+            embedding_function=DefaultEmbeddingFunction(),
+            metadata={"hnsw:space": "cosine"},
+        )
 
     # ------------------------------------------------------------------
     # Écriture
@@ -284,11 +261,16 @@ class MemoireRAG:
 
         cutoff = time.time() - max_age_jours * 86400
 
+        # Filtre fait par ChromaDB (statut + fiche) : on ne tronque pas la
+        # liste avant d'avoir gardé les candidats des fiches pertinentes.
         try:
             results = self._candidats.get(
-                where={"statut": {"$eq": "valide"}},
+                where={"$and": [
+                    {"statut": {"$eq": "valide"}},
+                    {"fiche_id": {"$in": sorted(fiche_ids_ok)}},
+                    {"last_seen": {"$gte": cutoff}},
+                ]},
                 include=["metadatas"],
-                limit=50,
             )
         except Exception as e:
             _log.warning("Erreur get_candidats_connus : %s", e)

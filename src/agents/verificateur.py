@@ -12,6 +12,7 @@ from langchain_core.messages import SystemMessage, HumanMessage
 
 from src.state import GraphState, CandidatValide
 from src.config import get_llm
+from src.llm_json import invoke_json, LLMJsonError
 from src.observabilite import get_metrics
 from src.logger import get_logger
 
@@ -192,33 +193,6 @@ def _profil_court(profil_brut: str, max_chars: int = 1600) -> str:
     return texte[:max_chars] + " [...]"
 
 
-def _parse_validation_json(content: str) -> dict:
-    """Parse une réponse A5 même si le modèle ajoute des fences ou du texte."""
-    cleaned = (content or "").strip()
-    if "```" in cleaned:
-        parts = cleaned.split("```")
-        cleaned = parts[1] if len(parts) > 1 else cleaned
-        if cleaned.strip().startswith("json"):
-            cleaned = cleaned.strip()[4:]
-    cleaned = cleaned.strip()
-
-    for candidate in (
-        cleaned,
-        re.search(r"\{.*\}", cleaned, re.DOTALL).group(0) if re.search(r"\{.*\}", cleaned, re.DOTALL) else "",
-        re.search(r"\[.*\]", cleaned, re.DOTALL).group(0) if re.search(r"\[.*\]", cleaned, re.DOTALL) else "",
-    ):
-        if not candidate:
-            continue
-        parsed = json.loads(candidate)
-        if isinstance(parsed, list):
-            if not parsed:
-                raise ValueError("Liste JSON vide")
-            parsed = parsed[0]
-        if isinstance(parsed, dict):
-            return parsed
-    raise ValueError("Aucun objet JSON valide trouvé")
-
-
 def _verifier_candidat_llm(llm, profil_requis: dict, cs: dict, profil_source: dict) -> tuple[dict, object | None]:
     candidat_info = {
         "candidat_id": cs["candidat_id"],
@@ -237,28 +211,13 @@ Candidat à vérifier :
 {json.dumps(candidat_info, ensure_ascii=False, indent=2)}
 
 Contrôle l'adéquation réelle du candidat et renvoie l'objet JSON demandé."""
-    last_error: Exception | None = None
-    response = None
-    for attempt in range(3):
-        response = llm.invoke([
-            SystemMessage(content=_VERIFICATEUR_UNITAIRE_SYSTEM),
-            HumanMessage(content=verif_msg),
-        ])
-        try:
-            validation = _parse_validation_json(response.content)
-            break
-        except Exception as exc:
-            last_error = exc
-            _log.warning(
-                "A5 JSON invalide pour %s tentative %d/3 : %s",
-                cs.get("nom", "?"),
-                attempt + 1,
-                str(exc)[:160],
-            )
-    else:
-        raise ValueError(
-            f"A5 n'a pas produit de JSON valide pour {cs.get('nom', '?')} après 3 tentatives : {last_error}"
-        )
+    validation, response = invoke_json(
+        llm,
+        [SystemMessage(content=_VERIFICATEUR_UNITAIRE_SYSTEM), HumanMessage(content=verif_msg)],
+        expected=dict,
+        attempts=3,
+        label=f"A5 {cs.get('nom', '?')[:40]}",
+    )
 
     validation.setdefault("candidat_id", cs["candidat_id"])
     validation.setdefault("nom", cs["nom"])
@@ -282,8 +241,30 @@ def verificateur_node(state: dict) -> dict:
     m.debut(f"A5_{candidat_score['candidat_id']}")
     _log.info("Vérification A5 de : %s", candidat_score.get("nom", "?"))
 
+    # Évaluation A4 en échec : rien à vérifier, le candidat est écarté.
+    if candidat_score.get("scores_detail", {}).get("evaluation_echouee"):
+        m.fin(f"A5_{candidat_score['candidat_id']}", candidat_nom=candidat_score["nom"], score=0.0, statut="invalide")
+        return {"candidats_valides": [CandidatValide(
+            candidat_id=candidat_score["candidat_id"],
+            nom=candidat_score["nom"],
+            score_final=0.0,
+            statut="invalide",
+            remarques="Évaluation A4 impossible.",
+            source=profil_source.get("source", ""),
+            url=profil_source.get("url"),
+        )]}
+
     llm = get_llm(temperature=0)
-    validation, response = _verifier_candidat_llm(llm, profil_requis, candidat_score, profil_source)
+    try:
+        validation, response = _verifier_candidat_llm(llm, profil_requis, candidat_score, profil_source)
+    except LLMJsonError as exc:
+        # Vérification impossible : le candidat reste "douteux" (jamais contacté
+        # automatiquement) au lieu de faire échouer tout le run.
+        _log.error("Vérification impossible pour %s : %s", candidat_score.get("nom", "?"), exc)
+        validation, response = {
+            "statut": "douteux",
+            "remarques": "Vérification A5 impossible (réponse du LLM inexploitable).",
+        }, None
     niveau_requis = profil_requis.get(
         "niveau_experience",
         profil_requis.get("niveau_seniorite", "indifferent"),
@@ -364,5 +345,5 @@ def verificateur_node(state: dict) -> dict:
 
     return {
         "candidats_valides": [candidat_valide],
-        "messages": [response],
+        "messages": [response] if response is not None else [],
     }

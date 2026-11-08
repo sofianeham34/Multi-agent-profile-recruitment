@@ -1,11 +1,11 @@
 """A2 — Analyste : extrait le profil de compétences depuis la fiche de poste."""
 
-import json
 import re
 from langchain_core.messages import SystemMessage, HumanMessage
 
 from src.state import GraphState
 from src.config import get_llm
+from src.llm_json import invoke_json
 from src.prompts import ANALYSTE_SYSTEM
 from src.observabilite import get_metrics
 from src.logger import get_logger
@@ -103,27 +103,9 @@ def analyste_node(state: GraphState) -> dict:
         HumanMessage(content=f"Fiche de poste :\n\n{state['fiche_poste']}")
     ]
 
-    response = llm.invoke(messages)
-    content = response.content.strip()
-
-    # extraire JSON de la réponse LLM
-    try:
-        if content.startswith("```"):  # nettoyer backticks markdown
-            content = content.split("```")[1]
-            if content.startswith("json"):
-                content = content[4:]
-        profil = json.loads(content)
-    except json.JSONDecodeError:
-        # fallback si JSON invalide
-        profil = {
-            "hard_skills": [],
-            "soft_skills": [],
-            "experience_min": 0,
-            "formation": "",
-            "contraintes": [],
-            "mots_cles": [],
-            "raw_response": content
-        }
+    # Sans profil de compétences, la suite du pipeline n'a pas de sens :
+    # en cas d'échec répété, le run s'arrête avec une erreur explicite.
+    profil, response = invoke_json(llm, messages, expected=dict, attempts=3, label="A2 analyste")
 
     signaux = _inferer_niveau_experience(state["fiche_poste"])
     ancien_niveau = profil.pop("niveau_seniorite", None)
