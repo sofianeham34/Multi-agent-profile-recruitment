@@ -35,13 +35,13 @@ from src.ui.layout import badge_statut, page_frame
 NODE_LABELS = {
     "orchestrateur": "A1 Orchestrateur",
     "analyste": "A2 Analyste",
-    "chercheur_stratege": "A3a Stratege",
+    "chercheur_stratege": "A3a Stratège",
     "chercheur_collecteur": "A3b Collecteur",
     "chercheur_filtre": "A3c Filtre",
-    "deduplicateur": "A6 Deduplicateur",
-    "evaluateur": "A4 Evaluateur",
+    "deduplicateur": "A6 Déduplicateur",
+    "evaluateur": "A4 Évaluateur",
     "reduce_scores": "Reduce",
-    "verificateur": "A5 Verificateur",
+    "verificateur": "A5 Vérificateur",
     "recruteur": "A7 Recruteur",
     "rapport": "Rapport",
     "persistance": "A8 RAG",
@@ -310,12 +310,12 @@ def _build_mermaid(completed: set[str], awaiting_hitl: bool = False) -> str:
 
 def _event_title(event_type: str, data: dict[str, Any]) -> str:
     if event_type == "node_completed":
-        return f"{NODE_LABELS.get(data.get('node'), data.get('node', 'Noeud'))} termine"
+        return f"{NODE_LABELS.get(data.get('node'), data.get('node', 'Nœud'))} terminé"
     labels = {
         "run_started": "Run demarre",
         "awaiting_hitl": "Validation humaine requise",
         "hitl_decision": "Decision HITL recue",
-        "run_done": "Run termine",
+        "run_done": "Run terminé",
         "run_error": "Erreur pipeline",
         "stream_closed": "Flux ferme",
         "connection_error": "Erreur de connexion SSE",
@@ -335,11 +335,11 @@ async def home_page() -> None:
                 "Lancez un run LangGraph, suivez les agents en direct et validez le contact candidat avant A7."
             ).classes("text-lg text-grey-8")
 
-            api_status = ui.label("API: verification...").classes("text-sm text-grey-7")
+            api_status = ui.label("API : vérification...").classes("text-sm text-grey-7")
             try:
                 status = await health()
                 api_status.text = (
-                    f"API connectee ({API_URL}) - {status.get('runs_running', 0)} run(s) actif(s)"
+                    f"API connectée ({API_URL}) - {status.get('runs_running', 0)} run(s) actif(s)"
                 )
             except Exception as exc:  # noqa: BLE001
                 api_status.text = f"API indisponible ({API_URL}) : {exc}"
@@ -347,10 +347,10 @@ async def home_page() -> None:
 
             fiche = ui.textarea(
                 label="Fiche de poste",
-                placeholder="Ex: Developpeur Python senior, 5 ans, Paris, FastAPI, LangChain, Docker...",
+                placeholder="Ex : Développeur Python senior, 5 ans, Paris, FastAPI, LangChain, Docker...",
             ).props("outlined autogrow").classes("w-full")
             fiche.value = (
-                "Developpeur Python senior, 5 ans d'experience, Paris ou remote, "
+                "Développeur Python senior, 5 ans d'expérience, Paris ou remote, "
                 "FastAPI, LangGraph, Docker, RAG, bonne communication."
             )
             hitl = ui.checkbox(
@@ -392,7 +392,7 @@ async def runs_page() -> None:
 
             with container:
                 if not runs:
-                    ui.label("Aucun run en memoire API pour le moment.").classes("text-grey-7")
+                    ui.label("Aucun run pour le moment.").classes("text-grey-7")
                     return
                 for run in runs:
                     with ui.card().classes("glass-card w-full p-4"):
@@ -401,7 +401,7 @@ async def runs_page() -> None:
                                 fiche = run.get("fiche_poste", "") or run["run_id"]
                                 ui.label(fiche[:100] + ("..." if len(fiche) > 100 else "")).classes("font-medium text-sm")
                                 ui.label(run["run_id"]).classes("font-mono text-xs text-grey-6")
-                                ui.label(f"Debut : {_format_date(run.get('started_at'))}").classes(
+                                ui.label(f"Début : {_format_date(run.get('started_at'))}").classes(
                                     "text-xs text-grey-7"
                                 )
                                 ui.label(f"Fin : {_format_date(run.get('finished_at'))}").classes(
@@ -416,7 +416,7 @@ async def runs_page() -> None:
                                 ).props("flat")
 
         await refresh()
-        ui.button("Rafraichir", icon="refresh", on_click=refresh).props("outline")
+        ui.button("Rafraîchir", icon="refresh", on_click=refresh).props("outline")
 
 
 @ui.page("/runs/{run_id}")
@@ -435,7 +435,7 @@ async def run_detail_page(run_id: str) -> None:
         with ui.card().classes("glass-card w-full p-5"):
             with ui.row().classes("items-center justify-between w-full"):
                 with ui.column().classes("gap-1"):
-                    ui.label("Execution du pipeline").classes("section-title text-4xl font-black text-primary")
+                    ui.label("Exécution du pipeline").classes("section-title text-4xl font-black text-primary")
                     ui.label(run_id).classes("font-mono text-sm text-grey-7")
                 status_box = ui.row().classes("items-center gap-2")
                 with status_box:
@@ -475,7 +475,7 @@ async def run_detail_page(run_id: str) -> None:
             update_status(rapport.get("status", "?"))
             with result_box:
                 with ui.card().classes("glass-card w-full p-5"):
-                    ui.label("Synthese").classes("text-2xl font-bold text-primary")
+                    ui.label("Synthèse").classes("text-2xl font-bold text-primary")
                     if rapport.get("erreur"):
                         ui.label(rapport["erreur"]).classes("text-negative")
                     rows = _candidate_rows(rapport.get("candidats"))
@@ -492,7 +492,7 @@ async def run_detail_page(run_id: str) -> None:
             hitl_box.clear()
             with hitl_box:
                 with ui.card().classes("glass-card w-full p-5 gap-3"):
-                    ui.label("Decision humaine requise avant A7").classes(
+                    ui.label("Décision humaine requise avant A7").classes(
                         "text-2xl font-bold text-secondary"
                     )
                     ui.label(
@@ -518,16 +518,16 @@ async def run_detail_page(run_id: str) -> None:
                                 ui.notify(f"JSON invalide : {exc}", type="negative")
                                 return
                             if not isinstance(payload, list):
-                                ui.notify("Le JSON doit etre une liste de candidats.", type="negative")
+                                ui.notify("Le JSON doit être une liste de candidats.", type="negative")
                                 return
                         try:
                             await submit_hitl(run_id, action, payload)
                         except httpx.HTTPError as exc:
-                            ui.notify(f"Decision refusee par l'API : {exc}", type="negative")
+                            ui.notify(f"Décision refusée par l'API : {exc}", type="negative")
                             return
                         hitl_box.clear()
                         update_status("running")
-                        ui.notify("Decision envoyee, reprise du pipeline.", type="positive")
+                        ui.notify("Décision envoyée, reprise du pipeline.", type="positive")
 
                     async def approve() -> None:
                         await decide("approve")
@@ -695,19 +695,19 @@ async def rapport_page(run_id: str) -> None:
 @ui.page("/rag")
 async def rag_page() -> None:
     _install_theme()
-    with page_frame("Memoire RAG"):
-        ui.label("Memoire vectorielle").classes("section-title text-4xl font-black text-primary")
+    with page_frame("Mémoire RAG"):
+        ui.label("Mémoire vectorielle").classes("section-title text-4xl font-black text-primary")
         try:
             summary = await get_rag_summary()
         except Exception as exc:  # noqa: BLE001
-            ui.label(f"Impossible de lire l'etat RAG : {exc}").classes("text-negative")
+            ui.label(f"Impossible de lire l'état RAG : {exc}").classes("text-negative")
             return
 
         with ui.row().classes("w-full gap-3"):
             for label, value in [
-                ("Candidats memorises", summary.get("candidats", 0)),
+                ("Candidats mémorisés", summary.get("candidats", 0)),
                 ("Fiches de poste", summary.get("fiches_poste", 0)),
-                ("Repertoire", summary.get("persist_dir", "-")),
+                ("Répertoire", summary.get("persist_dir", "-")),
             ]:
                 with ui.card().classes("metric-card p-4 grow"):
                     ui.label(str(value)).classes("text-3xl font-black text-primary")
@@ -717,18 +717,18 @@ async def rag_page() -> None:
 
         with ui.card().classes("glass-card w-full p-5 gap-3"):
             ui.label("Recherche de profils similaires").classes("text-2xl font-bold text-primary")
-            query = ui.textarea(label="Profil ou mots-cles", placeholder="Python FastAPI RAG Docker...").props(
+            query = ui.textarea(label="Profil ou mots-clés", placeholder="Python FastAPI RAG Docker...").props(
                 "outlined autogrow"
             ).classes("w-full")
             fiche = ui.textarea(
                 label="Fiche de poste de contexte (optionnel)",
-                placeholder="Si renseignee, la recherche est calibree sur les fiches similaires.",
+                placeholder="Si renseignée, la recherche est calibrée sur les fiches similaires.",
             ).props("outlined autogrow").classes("w-full")
             results_box = ui.column().classes("w-full")
 
             async def run_search() -> None:
                 if not query.value or not query.value.strip():
-                    ui.notify("Saisissez un profil ou des mots-cles.", type="warning")
+                    ui.notify("Saisissez un profil ou des mots-clés.", type="warning")
                     return
                 results_box.clear()
                 with results_box:
@@ -748,7 +748,7 @@ async def rag_page() -> None:
                             columns=[
                                 {"name": "nom", "label": "Nom", "field": "nom", "align": "left"},
                                 {"name": "score", "label": "Score", "field": "score", "align": "left"},
-                                {"name": "similarite", "label": "Similarite", "field": "similarite", "align": "left"},
+                                {"name": "similarite", "label": "Similarité", "field": "similarite", "align": "left"},
                                 {"name": "source", "label": "Source", "field": "source", "align": "left"},
                                 {"name": "remarques", "label": "Remarques", "field": "remarques", "align": "left"},
                             ],
@@ -756,11 +756,11 @@ async def rag_page() -> None:
                             row_key="nom",
                         ).classes("w-full")
                     else:
-                        ui.label("Aucun profil similaire trouve.").classes("text-grey-7")
+                        ui.label("Aucun profil similaire trouvé.").classes("text-grey-7")
 
             ui.button("Rechercher", icon="search", on_click=run_search).props("unelevated")
             with results_box:
-                ui.label("La recherche charge le modele d'embedding uniquement au clic.").classes(
+                ui.label("La recherche charge le modèle d'embedding uniquement au clic.").classes(
                     "text-xs text-grey-7"
                 )
 
@@ -768,12 +768,12 @@ async def rag_page() -> None:
 @ui.page("/metriques")
 async def metrics_page() -> None:
     _install_theme()
-    with page_frame("Metriques"):
+    with page_frame("Métriques"):
         ui.label("Observabilite").classes("section-title text-4xl font-black text-primary")
         try:
             payload = await get_metrics_summary()
         except Exception as exc:  # noqa: BLE001
-            ui.label(f"Impossible de charger les metriques : {exc}").classes("text-negative")
+            ui.label(f"Impossible de charger les métriques : {exc}").classes("text-negative")
             return
 
         current = payload.get("current", {})
@@ -785,7 +785,7 @@ async def metrics_page() -> None:
                 ui.label("Run courant").classes("text-sm text-grey-7")
             with ui.card().classes("metric-card p-4 grow"):
                 ui.label(f"{current.get('duree_totale_s', 0)} s").classes("text-3xl font-black text-primary")
-                ui.label("Duree en memoire").classes("text-sm text-grey-7")
+                ui.label("Durée en mémoire").classes("text-sm text-grey-7")
             with ui.card().classes("metric-card p-4 grow"):
                 ui.label(str(len(current.get("etapes", {})))).classes("text-3xl font-black text-primary")
                 ui.label("Etapes tracees").classes("text-sm text-grey-7")
@@ -804,15 +804,15 @@ async def metrics_page() -> None:
             if rows:
                 ui.table(
                     columns=[
-                        {"name": "etape", "label": "Etape", "field": "etape", "align": "left"},
-                        {"name": "duree_s", "label": "Duree (s)", "field": "duree_s", "align": "left"},
+                        {"name": "etape", "label": "Étape", "field": "etape", "align": "left"},
+                        {"name": "duree_s", "label": "Durée (s)", "field": "duree_s", "align": "left"},
                         {"name": "details", "label": "Details", "field": "details", "align": "left"},
                     ],
                     rows=rows,
                     row_key="etape",
                 ).classes("w-full")
             else:
-                ui.label("Aucune etape en memoire. Lancez un run pour alimenter cette vue.").classes("text-grey-7")
+                ui.label("Aucune étape en mémoire. Lancez un run pour alimenter cette vue.").classes("text-grey-7")
 
         history_rows = [
             {
@@ -832,7 +832,7 @@ async def metrics_page() -> None:
                         {"name": "run_id", "label": "Run", "field": "run_id", "align": "left"},
                         {
                             "name": "duree_totale_s",
-                            "label": "Duree totale (s)",
+                            "label": "Durée totale (s)",
                             "field": "duree_totale_s",
                             "align": "left",
                         },
@@ -842,7 +842,7 @@ async def metrics_page() -> None:
                     row_key="file",
                 ).classes("w-full")
             else:
-                ui.label("Aucun export de metriques trouve dans logs/.").classes("text-grey-7")
+                ui.label("Aucun export de métriques trouvé dans logs/.").classes("text-grey-7")
 
 
 def main() -> None:

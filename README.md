@@ -28,46 +28,38 @@ Système multi-agents (SMA) basé sur l'IA agentique pour automatiser la recherc
 
 ## Architecture
 
+Graphe LangGraph tel que construit dans [`src/graph.py`](src/graph.py) :
+
+```mermaid
+flowchart TD
+    F([Fiche de poste]) --> A1[A1 Orchestrateur]
+    A1 --> A2[A2 Analyste<br/>profil de compétences]
+    A2 --> A3a[A3a Stratège<br/>requêtes par source]
+    A3a --> A3b[A3b Collecteur<br/>GitHub · DuckDuckGo · Stack Overflow]
+    A3b --> A3c[A3c Filtre<br/>anti-bruit + scraping]
+    A3c --> A6[A6 Déduplicateur]
+    A6 -->|"Send() × N"| A4[A4 Évaluateur<br/>1 instance par candidat]
+    A4 --> R4[Agrégation des scores]
+    R4 -->|"Send() × N"| A5[A5 Vérificateur<br/>1 instance par candidat]
+    A5 --> R5[Agrégation des validations]
+    R5 --> RAG[Injection RAG<br/>candidats déjà connus]
+    RAG -->|score suffisant| H{{Validation humaine}}
+    H --> A7[A7 Recruteur<br/>messages personnalisés]
+    RAG -->|aucun candidat viable| RP[Rapport final]
+    A7 --> RP
+    RP --> A8[(A8 Persistance<br/>ChromaDB)]
 ```
-Fiche de poste
-      │
-      ▼
-[A1] Orchestrateur
-      │
-      ▼
-[A2] Analyste ──── Profil de compétences
-      │
-      ▼
-[A3a] Chercheur Stratège ──── Requêtes ciblées
-      │
-      ▼
-[A3b] Chercheur Collecteur ──── GitHub · DuckDuckGo · Stack Overflow
-      │
-      ▼
-[A3c] Chercheur Filtre
-      │
-      ▼
-[A6] Déduplicateur
-      │
-      ├──── [A4] Évaluateur  ┐
-      ├──── [A4] Évaluateur  ├── fan-out parallèle (1 par candidat)
-      └──── [A4] Évaluateur  ┘
-                │
-      ┌─────────┘
-      ├──── [A5] Vérificateur ┐
-      └──── [A5] Vérificateur ┘
-                │
-         ── validation humaine ──
-                │
-                ▼
-      [A7] Recruteur ──── Messages personnalisés
-                │
-                ▼
-      [A8] Persistance ──── ChromaDB (RAG)
-                │
-                ▼
-          Rapport final
-```
+
+- **Parallélisme** : A4 et A5 sont lancés en une instance par candidat (pattern `Send` de LangGraph), avec un nombre d'appels LLM simultanés borné.
+- **Blackboard** : tous les agents partagent un état typé (`GraphState`), chacun écrivant dans ses propres champs.
+- **Human-in-the-loop** : le graphe s'interrompt avant A7 ; l'utilisateur approuve, modifie ou rejette la liste des candidats à contacter.
+- **Mémoire inter-runs** : les candidats évalués sont stockés dans ChromaDB et réutilisés pour des fiches de poste similaires (calibration, cache de scores, liste noire).
+
+## Interface
+
+| Interface web (NiceGUI) | API REST (FastAPI / Swagger) |
+|---|---|
+| ![Interface](docs/screenshots/interface.jpg) | ![API](docs/screenshots/api-docs.jpg) |
 
 ---
 
