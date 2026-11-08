@@ -1,4 +1,4 @@
-# Automated Recruitment Multi-Agent System
+# Système multi-agents de recrutement automatisé
 
 ![Python](https://img.shields.io/badge/Python-3.10+-3776AB?logo=python&logoColor=white)
 ![LangGraph](https://img.shields.io/badge/LangGraph-Agentic%20AI-orange)
@@ -6,7 +6,12 @@
 ![Docker](https://img.shields.io/badge/Docker-Microservices-2496ED?logo=docker&logoColor=white)
 ![Tests](https://img.shields.io/badge/Tests-113%20automated-brightgreen)
 
-Système multi-agents (SMA) basé sur l'IA agentique pour automatiser la recherche et le contact de candidats développeurs. À partir d'une simple fiche de poste, le pipeline identifie, évalue et contacte les profils pertinents — avec validation humaine avant tout envoi.
+**À partir d'une simple fiche de poste, 8 agents IA coopèrent pour trouver, évaluer et préparer le contact de développeurs — avec un humain qui garde la décision finale.**
+
+Système multi-agents (SMA) construit avec LangGraph : un agent analyse le besoin, d'autres cherchent des profils
+sur GitHub, Stack Overflow et le web, les évaluent en parallèle, se contrôlent mutuellement, puis rédigent des
+messages de contact personnalisés. Les candidats évalués alimentent une mémoire vectorielle qui améliore les
+recherches suivantes.
 
 > TER Master 1 Informatique — Université de Montpellier  
 > Auteurs : Sofiane Hammar, Anouar Soufyani, Souad Hadji  
@@ -16,15 +21,24 @@ Système multi-agents (SMA) basé sur l'IA agentique pour automatiser la recherc
 
 ## Fonctionnalités
 
-- **Pipeline entièrement automatisé** : de la fiche de poste au rapport final
-- **8 agents spécialisés** orchestrés par LangGraph avec parallélisation fan-out
-- **Multi-sources** : GitHub, DuckDuckGo, Stack Overflow
-- **RAG (mémoire vectorielle)** : historique des candidats via ChromaDB
-- **Human-in-the-loop** : validation humaine avant contact des candidats
-- **Double déploiement** : mode local LangGraph ou microservices Docker
-- **113 tests automatisés** (pytest), dont une exécution complète du pipeline sans réseau
+- **Pipeline de bout en bout** : de la fiche de poste au rapport final et aux messages de contact personnalisés
+- **8 agents spécialisés** orchestrés par LangGraph, avec évaluation et vérification en parallèle
+- **Multi-sources** : API GitHub, API Stack Overflow, recherche web (DuckDuckGo) et scraping
+- **Mémoire RAG** (ChromaDB) : historique des candidats réutilisé d'un recrutement à l'autre
+- **Human-in-the-loop** : par défaut, la liste des candidats à contacter est soumise à validation humaine
+- **Interface web** avec suivi des agents en direct, **API REST** et **CLI**
+- **Déploiement Docker** : monolithique ou un microservice par agent
 
----
+## Défis techniques
+
+| Problème | Solution mise en place |
+|---|---|
+| Les résultats de recherche contiennent surtout du bruit (offres d'emploi, articles, listes) | Agent filtre dédié (A3c) : élimination des URL non pertinentes, détection des pages agrégées, priorisation des profils individuels |
+| Un LLM peut surévaluer un candidat | **Validation pair-à-pair** : A4 note, A5 contrôle indépendamment avec des règles métier (expérience, page non-candidat, adéquation minimale) |
+| Trouver des candidats même sans profil « parfait » | **Routage absolu ou relatif** : contact au-dessus du seuil, sinon proposition des meilleurs profils viables |
+| La mémoire ne doit pas biaiser un poste avec les scores d'un autre | **RAG calibré par fiche de poste** : les références ne sont utilisées que pour des fiches similaires (seuil de similarité), avec cache de scores et liste noire inter-runs |
+| Les réponses d'un LLM ne sont pas toujours exploitables | Extraction JSON centralisée avec nouvelle tentative ; un candidat non évaluable est écarté, jamais noté au hasard |
+| Les API externes et le LLM limitent le débit | Parallélisme borné (`max_concurrency`), relances exponentielles sur les erreurs 429 |
 
 ## Architecture
 
@@ -123,11 +137,20 @@ python -m src.main --no-interrupt "Data Scientist ML, remote"
 
 ---
 
-## Tests
+## Qualité
 
 ```bash
 python3 -m pytest tests/ -v
 ```
+
+- **113 tests automatisés** : règles de filtrage et de vérification, déduplication, génération des requêtes, mémoire RAG, API REST, sources externes
+- **Test du pipeline complet sans réseau** : les 13 nœuds du graphe s'exécutent avec un LLM et des sources simulés (fan-out parallèle, routage, contact du seul bon candidat, rejet d'une réponse LLM inexploitable)
+- **Observabilité** : durée et résultat de chaque agent exportés en JSON dans `logs/` à chaque run, consultables dans l'interface
+
+## Recherche
+
+Le dossier [`Etudes/`](Etudes) contient l'état de l'art réalisé pendant le TER : synthèses d'articles sur les
+systèmes multi-agents et l'IA agentique, et comparatif des frameworks d'agents ayant mené au choix de LangGraph.
 
 ---
 
@@ -139,8 +162,10 @@ src/
 ├── tools/           # GitHub API, DuckDuckGo, Stack Overflow, RAG
 ├── ui/              # Interface web
 ├── graph.py         # Graphe LangGraph
+├── llm_json.py      # Appels LLM à réponse JSON (extraction, nouvelle tentative)
 ├── api.py           # API Gateway FastAPI
 └── state.py         # État partagé entre agents
 services/            # Microservices Docker (1 par agent)
 tests/               # 113 tests automatisés
+Etudes/              # État de l'art (SMA, IA agentique, frameworks)
 ```
