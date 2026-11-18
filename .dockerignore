@@ -10,3 +10,4 @@ logs/
 Etudes/
 docs/
 tests/
+.nicegui/

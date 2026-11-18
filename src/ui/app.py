@@ -11,11 +11,12 @@ from __future__ import annotations
 import json
 import os
 import re
+import secrets
 from datetime import datetime
 from typing import Any
 
 import httpx
-from nicegui import background_tasks, ui
+from nicegui import app, background_tasks, ui
 
 from src.ui.api_client import (
     API_URL,
@@ -369,6 +370,11 @@ def _message_erreur(exc: Exception) -> str:
     return str(exc)
 
 
+def _mes_recherches() -> list[str]:
+    """Recherches lancées depuis ce navigateur (stockage NiceGUI propre à chaque visiteur)."""
+    return app.storage.user.setdefault("recherches", [])
+
+
 async def _etat_demo() -> dict:
     """Mode démo publique annoncé par l'API (vide si l'API ne répond pas)."""
     try:
@@ -408,7 +414,7 @@ async def home_page() -> None:
                 ui.label(
                     f"Démo publique : {demo.get('restantes', 0)} recherche(s) restante(s) aujourd'hui sur "
                     f"{demo.get('max_par_jour')}, une à la fois. Une recherche dure 3 à 5 minutes ; "
-                    "les recherches précédentes restent consultables dans l'historique."
+                    "vos recherches restent consultables dans l'historique de ce navigateur."
                 ).classes("text-sm text-orange-9")
 
             fiche = ui.textarea(
@@ -444,6 +450,7 @@ async def home_page() -> None:
                 except httpx.HTTPError as exc:
                     ui.notify(_message_erreur(exc), type="negative", multi_line=True)
                     return
+                _mes_recherches().append(result["run_id"])
                 ui.navigate.to(f"/runs/{result['run_id']}")
 
             lancer = ui.button("Lancer la recherche", icon="rocket_launch", on_click=start_run).props(
@@ -482,6 +489,10 @@ async def runs_page() -> None:
             container.clear()
             try:
                 runs = await list_runs()
+                if lecture_seule:
+                    # Démo publique : chaque visiteur ne voit que ses propres recherches.
+                    mes = set(_mes_recherches())
+                    runs = [r for r in runs if r.get("run_id") in mes]
             except Exception as exc:  # noqa: BLE001
                 with container:
                     ui.label(f"Impossible de charger les recherches : {exc}").classes("text-negative")
@@ -489,7 +500,10 @@ async def runs_page() -> None:
 
             with container:
                 if not runs:
-                    ui.label("Aucune recherche pour le moment.").classes("text-grey-7")
+                    ui.label(
+                        "Aucune recherche lancée depuis ce navigateur pour le moment."
+                        if lecture_seule else "Aucune recherche pour le moment."
+                    ).classes("text-grey-7")
                     return
                 for run in runs:
                     actif = run.get("status") in ("running", "awaiting_hitl")
@@ -1074,6 +1088,8 @@ def main() -> None:
         reload=os.getenv("UI_RELOAD", "false").lower() == "true",
         show=False,
         show_welcome_message=False,
+        # Signe le cookie qui identifie le navigateur (historique propre à chaque visiteur).
+        storage_secret=os.getenv("UI_STORAGE_SECRET") or secrets.token_urlsafe(32),
     )
 
 
