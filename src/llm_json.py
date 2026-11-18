@@ -18,9 +18,20 @@ class LLMJsonError(ValueError):
     """Le LLM n'a pas produit de JSON exploitable après plusieurs tentatives."""
 
 
-def parse_json(content: str):
+def _as_text(content) -> str:
+    """Certains fournisseurs renvoient le contenu en liste de blocs plutôt qu'en texte."""
+    if isinstance(content, list):
+        return "".join(
+            bloc if isinstance(bloc, str) else bloc.get("text", "")
+            for bloc in content
+            if isinstance(bloc, (str, dict))
+        )
+    return content or ""
+
+
+def parse_json(content):
     """Extrait le premier objet ou tableau JSON d'une réponse de LLM."""
-    text = (content or "").strip()
+    text = _as_text(content).strip()
     if not text:
         raise ValueError("Réponse vide")
 

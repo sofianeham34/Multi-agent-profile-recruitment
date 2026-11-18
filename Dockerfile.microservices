@@ -14,5 +14,4 @@ COPY services/ ./services/
 
 RUN mkdir -p logs data/chromadb
 
-ENV LLM_PROVIDER=groq
-ENV LLM_MODEL=openai/gpt-oss-120b
+ENV LLM_PROVIDER=openrouter

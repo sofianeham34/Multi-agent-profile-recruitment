@@ -19,8 +19,7 @@ COPY services/ ./services/
 RUN mkdir -p logs data/chromadb
 
 # Variables d'environnement par défaut (surchargeables via docker-compose ou CLI)
-ENV LLM_PROVIDER=groq
-ENV LLM_MODEL=openai/gpt-oss-120b
+ENV LLM_PROVIDER=openrouter
 ENV SCORE_SEUIL_CONTACT=75
 ENV MAX_PROFILS_RECHERCHE=15
 

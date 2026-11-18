@@ -6,7 +6,6 @@ services:
     env_file:
       - .env
     environment:
-      - LLM_PROVIDER=groq
     ports:
       - "${API_PORT:-8000}:8000"
     volumes:
@@ -36,7 +35,6 @@ services:
     env_file:
       - .env
     environment:
-      - LLM_PROVIDER=groq
     volumes:
       - ./logs:/app/logs
       - ./data:/app/data
