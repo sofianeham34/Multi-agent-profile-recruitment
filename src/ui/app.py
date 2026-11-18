@@ -19,6 +19,10 @@ from nicegui import background_tasks, ui
 
 from src.ui.api_client import (
     API_URL,
+    cancel_run,
+    clear_rag,
+    clear_runs,
+    delete_run,
     get_metrics_summary,
     get_rag_summary,
     get_rapport,
@@ -40,8 +44,10 @@ NODE_LABELS = {
     "chercheur_filtre": "A3c Filtre",
     "deduplicateur": "A6 Déduplicateur",
     "evaluateur": "A4 Évaluateur",
-    "reduce_scores": "Reduce",
+    "reduce_scores": "Regroupement des scores",
     "verificateur": "A5 Vérificateur",
+    "reduce_validations": "Regroupement des vérifications",
+    "injection_rag": "Mémoire (candidats déjà connus)",
     "recruteur": "A7 Recruteur",
     "rapport": "Rapport",
     "persistance": "A8 RAG",
@@ -141,8 +147,10 @@ def _format_date(value: str | None) -> str:
 
 def _candidate_rows(candidats: list[dict] | None) -> list[dict]:
     rows = []
-    for c in candidats or []:
+    for i, c in enumerate(candidats or []):
         rows.append({
+            "id": c.get("candidat_id") or str(i),
+            "url": c.get("url") or "",
             "nom": c.get("nom", "?"),
             "score_final": c.get("score_final", c.get("score", "")),
             "statut": c.get("statut", ""),
@@ -160,6 +168,31 @@ def _candidate_columns() -> list[dict]:
         {"name": "source", "label": "Source", "field": "source", "align": "left"},
         {"name": "remarques", "label": "Remarques", "field": "remarques", "align": "left"},
     ]
+
+
+def _candidate_table(candidats: list[dict] | None):
+    """Tableau des candidats ; le nom renvoie vers le profil quand l'URL est connue."""
+    table = ui.table(columns=_candidate_columns(), rows=_candidate_rows(candidats), row_key="id").classes("w-full")
+    table.add_slot(
+        "body-cell-nom",
+        '<q-td :props="props"><a v-if="props.row.url" :href="props.row.url" target="_blank" rel="noopener">'
+        "{{ props.value }}</a><span v-else>{{ props.value }}</span></q-td>",
+    )
+    return table
+
+
+def _candidats_csv(candidats: list[dict] | None) -> str:
+    """Export CSV des candidats (séparateur ; pour Excel en français)."""
+    import csv
+    import io
+
+    sortie = io.StringIO()
+    ecrivain = csv.writer(sortie, delimiter=";")
+    ecrivain.writerow(["Nom", "Score", "Statut", "Source", "Lien", "Remarques"])
+    for c in sorted(candidats or [], key=lambda x: x.get("score_final", 0), reverse=True):
+        ecrivain.writerow([c.get("nom", ""), c.get("score_final", ""), c.get("statut", ""),
+                           c.get("source", ""), c.get("url") or "", c.get("remarques", "")])
+    return "\ufeff" + sortie.getvalue()  # BOM : accents corrects dans Excel
 
 
 def _candidate_stats(candidats: list[dict] | None) -> dict[str, int]:
@@ -312,15 +345,36 @@ def _event_title(event_type: str, data: dict[str, Any]) -> str:
     if event_type == "node_completed":
         return f"{NODE_LABELS.get(data.get('node'), data.get('node', 'Nœud'))} terminé"
     labels = {
-        "run_started": "Run demarre",
+        "run_started": "Recherche démarrée",
         "awaiting_hitl": "Validation humaine requise",
-        "hitl_decision": "Decision HITL recue",
-        "run_done": "Run terminé",
-        "run_error": "Erreur pipeline",
-        "stream_closed": "Flux ferme",
-        "connection_error": "Erreur de connexion SSE",
+        "hitl_decision": "Décision humaine reçue",
+        "run_done": "Recherche terminée",
+        "run_error": "Recherche arrêtée",
+        "stream_closed": "Fin du suivi en direct",
+        "connection_error": "Connexion au suivi perdue",
     }
     return labels.get(event_type, event_type)
+
+
+def _message_erreur(exc: Exception) -> str:
+    """Message lisible : le « detail » renvoyé par l'API plutôt que le code HTTP brut."""
+    reponse = getattr(exc, "response", None)
+    if reponse is not None:
+        try:
+            detail = reponse.json().get("detail")
+        except ValueError:
+            detail = None
+        if isinstance(detail, str) and detail:
+            return detail
+    return str(exc)
+
+
+async def _etat_demo() -> dict:
+    """Mode démo publique annoncé par l'API (vide si l'API ne répond pas)."""
+    try:
+        return (await health()).get("demo") or {}
+    except Exception:  # noqa: BLE001
+        return {}
 
 
 @ui.page("/")
@@ -328,33 +382,56 @@ async def home_page() -> None:
     _install_theme()
     with page_frame("Accueil"):
         with ui.card().classes("glass-card w-full p-8 gap-5"):
-            ui.label("Piloter un recrutement multi-agents").classes(
+            ui.label("Trouver des candidats avec des agents IA").classes(
                 "section-title text-5xl font-black text-primary"
             )
             ui.label(
-                "Lancez un run LangGraph, suivez les agents en direct et validez le contact candidat avant A7."
+                "Collez une fiche de poste : les agents cherchent des profils et les évaluent. Vous choisissez "
+                "les candidats à retenir, puis les agents rédigent leurs messages de contact (rien n'est envoyé)."
             ).classes("text-lg text-grey-8")
 
             api_status = ui.label("API : vérification...").classes("text-sm text-grey-7")
+            demo: dict = {}
             try:
                 status = await health()
+                demo = status.get("demo") or {}
+                llm = status.get("llm") or {}
                 api_status.text = (
-                    f"API connectée ({API_URL}) - {status.get('runs_running', 0)} run(s) actif(s)"
+                    f"API connectée · {status.get('runs_running', 0)} recherche(s) en cours"
+                    + (f" · LLM : {llm.get('modele')} via {llm.get('fournisseur')}" if llm else "")
                 )
             except Exception as exc:  # noqa: BLE001
                 api_status.text = f"API indisponible ({API_URL}) : {exc}"
                 api_status.classes(add="text-negative")
 
+            if demo.get("active"):
+                ui.label(
+                    f"Démo publique : {demo.get('restantes', 0)} recherche(s) restante(s) aujourd'hui sur "
+                    f"{demo.get('max_par_jour')}, une à la fois. Une recherche dure 3 à 5 minutes ; "
+                    "les recherches précédentes restent consultables dans l'historique."
+                ).classes("text-sm text-orange-9")
+
             fiche = ui.textarea(
                 label="Fiche de poste",
-                placeholder="Ex : Développeur Python senior, 5 ans, Paris, FastAPI, LangChain, Docker...",
+                placeholder="Ex : Développeur backend Python, 2 à 4 ans d'expérience, Lyon, Django, PostgreSQL...",
             ).props("outlined autogrow").classes("w-full")
+            if demo.get("max_fiche"):
+                fiche.props(f"maxlength={demo['max_fiche']} counter")
             fiche.value = (
-                "Développeur Python senior, 5 ans d'expérience, Paris ou remote, "
-                "FastAPI, LangGraph, Docker, RAG, bonne communication."
+                "Développeur backend Python, 2 à 4 ans d'expérience, CDI à Lyon. "
+                "Compétences : Python, Django, PostgreSQL, Docker, Git. Esprit d'équipe."
             )
+            exemples = {
+                "Backend Python": "Développeur backend Python, 2 à 4 ans d'expérience, CDI à Lyon. Compétences : Python, Django, PostgreSQL, Docker, Git. Esprit d'équipe.",
+                "Front-end React": "Développeur front-end React et TypeScript, 2 ans d'expérience, Bordeaux. Compétences : React, TypeScript, CSS, tests.",
+                "Data engineer": "Data engineer confirmé, 3 ans d'expérience, Paris. Compétences : Python, SQL, Spark, Airflow.",
+            }
+            with ui.row().classes("items-center gap-2"):
+                ui.label("Exemples :").classes("text-sm text-grey-7")
+                for nom, texte in exemples.items():
+                    ui.chip(nom, on_click=lambda t=texte: fiche.set_value(t)).props("outline clickable")
             hitl = ui.checkbox(
-                "Activer la validation humaine avant le contact candidat (HITL)",
+                "Valider moi-même les candidats avant la rédaction des messages",
                 value=True,
             )
 
@@ -365,21 +442,41 @@ async def home_page() -> None:
                 try:
                     result = await launch_run(fiche.value.strip(), no_interrupt=not hitl.value)
                 except httpx.HTTPError as exc:
-                    ui.notify(f"Erreur API: {exc}", type="negative")
+                    ui.notify(_message_erreur(exc), type="negative", multi_line=True)
                     return
                 ui.navigate.to(f"/runs/{result['run_id']}")
 
-            ui.button("Lancer le pipeline", icon="rocket_launch", on_click=start_run).props(
+            lancer = ui.button("Lancer la recherche", icon="rocket_launch", on_click=start_run).props(
                 "unelevated size=lg"
             ).classes("self-start")
+            if demo.get("active") and demo.get("restantes", 1) <= 0:
+                lancer.disable()
 
 
 @ui.page("/runs")
 async def runs_page() -> None:
     _install_theme()
     with page_frame("Historique"):
-        ui.label("Runs de recrutement").classes("section-title text-4xl font-black text-primary")
+        ui.label("Recherches").classes("section-title text-4xl font-black text-primary")
+        lecture_seule = bool((await _etat_demo()).get("active"))
         container = ui.column().classes("w-full gap-3")
+
+        async def confirmer(message: str, action) -> None:
+            with ui.dialog() as dialog, ui.card().classes("p-5 gap-4"):
+                ui.label(message)
+                with ui.row().classes("justify-end w-full gap-2"):
+                    ui.button("Annuler", on_click=dialog.close).props("flat")
+
+                    async def valider() -> None:
+                        dialog.close()
+                        try:
+                            await action()
+                        except Exception as exc:  # noqa: BLE001
+                            ui.notify(f"Suppression impossible : {_message_erreur(exc)}", type="negative")
+                        await refresh()
+
+                    ui.button("Supprimer", color="negative", on_click=valider).props("unelevated")
+            dialog.open()
 
         async def refresh() -> None:
             container.clear()
@@ -387,42 +484,65 @@ async def runs_page() -> None:
                 runs = await list_runs()
             except Exception as exc:  # noqa: BLE001
                 with container:
-                    ui.label(f"Impossible de charger les runs : {exc}").classes("text-negative")
+                    ui.label(f"Impossible de charger les recherches : {exc}").classes("text-negative")
                 return
 
             with container:
                 if not runs:
-                    ui.label("Aucun run pour le moment.").classes("text-grey-7")
+                    ui.label("Aucune recherche pour le moment.").classes("text-grey-7")
                     return
                 for run in runs:
+                    actif = run.get("status") in ("running", "awaiting_hitl")
                     with ui.card().classes("glass-card w-full p-4"):
-                        with ui.row().classes("items-center justify-between w-full gap-3"):
-                            with ui.column().classes("gap-1"):
-                                fiche = run.get("fiche_poste", "") or run["run_id"]
-                                ui.label(fiche[:100] + ("..." if len(fiche) > 100 else "")).classes("font-medium text-sm")
-                                ui.label(run["run_id"]).classes("font-mono text-xs text-grey-6")
-                                ui.label(f"Début : {_format_date(run.get('started_at'))}").classes(
-                                    "text-xs text-grey-7"
+                        with ui.row().classes("items-start justify-between w-full gap-3 no-wrap"):
+                            with ui.column().classes("gap-1 min-w-0"):
+                                # La fiche de poste complète : c'est elle qui identifie la recherche.
+                                ui.label(run.get("fiche_poste") or run["run_id"]).classes(
+                                    "font-medium text-sm whitespace-pre-wrap break-words"
                                 )
-                                ui.label(f"Fin : {_format_date(run.get('finished_at'))}").classes(
-                                    "text-xs text-grey-7"
-                                )
-                            with ui.row().classes("items-center gap-2"):
+                                ui.label(
+                                    f"Début : {_format_date(run.get('started_at'))} · "
+                                    f"Fin : {_format_date(run.get('finished_at'))}"
+                                ).classes("text-xs text-grey-7")
+                            with ui.row().classes("items-center gap-1 no-wrap"):
                                 badge_statut(run.get("status", "?"))
                                 ui.button(
                                     "Ouvrir",
                                     icon="open_in_new",
                                     on_click=lambda r=run: ui.navigate.to(f"/runs/{r['run_id']}"),
                                 ).props("flat")
+                                if lecture_seule:
+                                    continue
+                                bouton = ui.button(
+                                    icon="delete",
+                                    on_click=lambda r=run: confirmer(
+                                        "Supprimer cette recherche de l'historique ?",
+                                        lambda: delete_run(r["run_id"]),
+                                    ),
+                                ).props("flat round color=negative").tooltip(
+                                    "Annulez la recherche avant de la supprimer" if actif else "Supprimer"
+                                )
+                                if actif:
+                                    bouton.disable()
 
         await refresh()
-        ui.button("Rafraîchir", icon="refresh", on_click=refresh).props("outline")
+        with ui.row().classes("gap-2"):
+            ui.button("Rafraîchir", icon="refresh", on_click=refresh).props("outline")
+            vider_historique = ui.button(
+                "Vider l'historique",
+                icon="delete_sweep",
+                on_click=lambda: confirmer(
+                    "Supprimer toutes les recherches terminées ? Les recherches en cours sont gardées.",
+                    clear_runs,
+                ),
+            ).props("outline color=negative")
+            vider_historique.set_visibility(not lecture_seule)
 
 
 @ui.page("/runs/{run_id}")
 async def run_detail_page(run_id: str) -> None:
     _install_theme()
-    with page_frame("Run live"):
+    with page_frame("Recherche"):
         try:
             initial = await get_rapport(run_id)
         except Exception as exc:  # noqa: BLE001
@@ -435,33 +555,60 @@ async def run_detail_page(run_id: str) -> None:
         with ui.card().classes("glass-card w-full p-5"):
             with ui.row().classes("items-center justify-between w-full"):
                 with ui.column().classes("gap-1"):
-                    ui.label("Exécution du pipeline").classes("section-title text-4xl font-black text-primary")
-                    ui.label(run_id).classes("font-mono text-sm text-grey-7")
-                status_box = ui.row().classes("items-center gap-2")
-                with status_box:
-                    badge_statut(initial.get("status", "?"))
+                    ui.label("Recherche").classes("section-title text-4xl font-black text-primary")
+                    if initial.get("fiche_poste"):
+                        ui.label(initial["fiche_poste"]).classes("text-base whitespace-pre-wrap break-words")
+                    ui.label(run_id).classes("font-mono text-xs text-grey-6")
+                with ui.row().classes("items-center gap-2"):
+                    status_box = ui.row().classes("items-center gap-2")
+                    with status_box:
+                        badge_statut(initial.get("status", "?"))
+
+                    async def annuler() -> None:
+                        try:
+                            await cancel_run(run_id)
+                        except httpx.HTTPError as exc:
+                            ui.notify(f"Annulation impossible : {_message_erreur(exc)}", type="negative")
+                            return
+                        ui.notify("Annulation demandée : la recherche s'arrête à la fin de l'étape en cours.")
+
+                    bouton_annuler = ui.button("Annuler", icon="stop", on_click=annuler).props(
+                        "outline color=negative"
+                    )
+                    bouton_annuler.set_visibility(initial.get("status") in ("running", "awaiting_hitl"))
 
             diagram = ui.mermaid(_build_mermaid(completed, awaiting_hitl)).classes("w-full")
 
         hitl_box = ui.column().classes("w-full gap-3")
-        timeline = ui.column().classes("w-full gap-2")
         result_box = ui.column().classes("w-full gap-3")
+        with ui.card().classes("glass-card w-full p-5 gap-2"):
+            ui.label("Chronologie").classes("text-2xl font-bold text-primary")
+            timeline = ui.column().classes("w-full gap-1")
+            with timeline:
+                ui.label("Connexion au suivi en direct...").classes("text-grey-7")
 
         def update_status(status: str) -> None:
             status_box.clear()
             with status_box:
                 badge_statut(status)
+            bouton_annuler.set_visibility(status in ("running", "awaiting_hitl"))
 
         def add_event(event_type: str, data: dict[str, Any]) -> None:
+            if event_type == "node_completed" and data.get("node") == "__interrupt__":
+                return  # pause interne de LangGraph : l'événement « Validation humaine requise » suit
+            # Une ligne par étape ; le détail technique reste replié.
+            heure = str(data.get("ts", ""))[11:19]
+            details = {k: v for k, v in data.items() if k != "ts"}
             with timeline:
-                with ui.card().classes("timeline-item w-full p-3"):
-                    with ui.row().classes("items-center justify-between w-full"):
-                        ui.label(_event_title(event_type, data)).classes("font-bold")
-                        ui.label(data.get("ts", "")).classes("text-xs text-grey-6")
-                    if data:
-                        ui.markdown(f"```json\n{json.dumps(data, ensure_ascii=False, indent=2)}\n```").classes(
+                if event_type == "run_error" and data.get("erreur"):
+                    ui.label(f"{heure}  {_event_title(event_type, data)} : {data['erreur']}").classes("text-negative")
+                elif details:
+                    with ui.expansion(f"{heure}  {_event_title(event_type, data)}").classes("w-full").props("dense"):
+                        ui.markdown(f"```json\n{json.dumps(details, ensure_ascii=False, indent=2)}\n```").classes(
                             "text-xs w-full"
                         )
+                else:
+                    ui.label(f"{heure}  {_event_title(event_type, data)}").classes("text-sm px-4 py-1")
 
         async def render_report() -> None:
             result_box.clear()
@@ -473,14 +620,16 @@ async def run_detail_page(run_id: str) -> None:
                 return
 
             update_status(rapport.get("status", "?"))
+            if rapport.get("status") in ("running", "awaiting_hitl"):
+                return  # la synthèse s'affiche une fois la recherche terminée
             with result_box:
                 with ui.card().classes("glass-card w-full p-5"):
                     ui.label("Synthèse").classes("text-2xl font-bold text-primary")
                     if rapport.get("erreur"):
-                        ui.label(rapport["erreur"]).classes("text-negative")
-                    rows = _candidate_rows(rapport.get("candidats"))
-                    if rows:
-                        ui.table(columns=_candidate_columns(), rows=rows, row_key="nom").classes("w-full")
+                        couleur = "text-grey-7" if rapport.get("status") == "interrupted" else "text-negative"
+                        ui.label(rapport["erreur"]).classes(couleur)
+                    if rapport.get("candidats"):
+                        _candidate_table(rapport.get("candidats"))
                     if rapport.get("rapport"):
                         ui.button(
                             "Ouvrir le rapport complet",
@@ -492,63 +641,71 @@ async def run_detail_page(run_id: str) -> None:
             hitl_box.clear()
             with hitl_box:
                 with ui.card().classes("glass-card w-full p-5 gap-3"):
-                    ui.label("Décision humaine requise avant A7").classes(
+                    ui.label("Validation humaine avant tout contact").classes(
                         "text-2xl font-bold text-secondary"
                     )
                     ui.label(
-                        "Approuver la liste, tout rejeter, ou editer le JSON puis reprendre le pipeline."
+                        "Cochez les candidats à retenir : un message de contact sera rédigé pour chacun. "
+                        "Rien n'est envoyé automatiquement, vous copiez les messages depuis le rapport."
                     ).classes("text-grey-8")
-                    if candidats:
-                        ui.table(
-                            columns=_candidate_columns(),
-                            rows=_candidate_rows(candidats),
-                            row_key="nom",
-                        ).classes("w-full")
-                    editor = ui.textarea(
-                        label="candidats_retenus pour action=edit",
-                        value=json.dumps(candidats, ensure_ascii=False, indent=2),
-                    ).props("outlined autogrow").classes("w-full font-mono")
+                    choix: dict[str, Any] = {}
+                    proposables = [c for c in candidats if c.get("statut") in ("valide", "douteux")]
+                    masques = len(candidats) - len(proposables)
+                    if not proposables:
+                        ui.label("Aucun candidat valide ou douteux à proposer.").classes("text-grey-7")
+                    elif not any(c.get("statut") == "valide" for c in proposables):
+                        ui.label(
+                            "Aucun profil n'a été validé automatiquement : ouvrez les profils douteux "
+                            "et cochez ceux qui vous conviennent."
+                        ).classes("text-orange-9")
+                    for c in proposables:
+                        with ui.row().classes("items-center gap-3 w-full no-wrap"):
+                            choix[c.get("candidat_id", "")] = ui.checkbox(value=c.get("statut") == "valide")
+                            with ui.column().classes("gap-0 min-w-0"):
+                                with ui.row().classes("items-center gap-2"):
+                                    if c.get("url"):
+                                        ui.link(c.get("nom", "?"), c["url"], new_tab=True).classes("font-medium")
+                                    else:
+                                        ui.label(c.get("nom", "?")).classes("font-medium")
+                                    ui.badge(f"{c.get('score_final', 0):.0f}/100", color="primary")
+                                    ui.badge(c.get("statut", "?"), color={"valide": "green", "douteux": "orange"}.get(c.get("statut"), "grey"))
+                                ui.label(c.get("remarques", "")[:220]).classes("text-xs text-grey-7")
 
-                    async def decide(action: str) -> None:
-                        payload = None
-                        if action == "edit":
-                            try:
-                                payload = json.loads(editor.value or "[]")
-                            except json.JSONDecodeError as exc:
-                                ui.notify(f"JSON invalide : {exc}", type="negative")
-                                return
-                            if not isinstance(payload, list):
-                                ui.notify("Le JSON doit être une liste de candidats.", type="negative")
-                                return
+                    if masques:
+                        ui.label(f"{masques} profil(s) invalide(s) masqué(s) : ils ne seront pas contactés.").classes(
+                            "text-xs text-grey-6"
+                        )
+
+                    async def decide(action: str, payload: list | None = None) -> None:
                         try:
                             await submit_hitl(run_id, action, payload)
                         except httpx.HTTPError as exc:
-                            ui.notify(f"Décision refusée par l'API : {exc}", type="negative")
+                            ui.notify(f"Décision refusée par l'API : {_message_erreur(exc)}", type="negative")
                             return
-                        hitl_box.clear()
-                        update_status("running")
+                        # Notification avant de vider la zone : le bouton cliqué en fait partie.
                         ui.notify("Décision envoyée, reprise du pipeline.", type="positive")
+                        update_status("running")
+                        hitl_box.clear()
 
-                    async def approve() -> None:
-                        await decide("approve")
+                    async def contacter_selection() -> None:
+                        retenus = [
+                            {**c, "statut": "valide"}
+                            for c in candidats
+                            if choix.get(c.get("candidat_id", "")) and choix[c.get("candidat_id", "")].value
+                        ]
+                        if not retenus:
+                            await decide("skip")
+                            return
+                        await decide("edit", retenus)
 
-                    async def skip() -> None:
+                    async def tout_rejeter() -> None:
                         await decide("skip")
 
-                    async def edit() -> None:
-                        await decide("edit")
-
                     with ui.row().classes("gap-2"):
-                        ui.button("Approuver", icon="check", on_click=approve).props("unelevated")
-                        ui.button("Tout rejeter", icon="block", on_click=skip).props(
+                        ui.button("Rédiger les messages", icon="edit_note", on_click=contacter_selection).props("unelevated")
+                        ui.button("Ne retenir personne", icon="block", on_click=tout_rejeter).props(
                             "outline color=negative"
                         )
-                        ui.button("Reprendre avec le JSON", icon="edit", on_click=edit).props("outline")
-
-        with ui.card().classes("glass-card w-full p-5"):
-            ui.label("Timeline live").classes("text-2xl font-bold text-primary")
-            with timeline:
-                ui.label("Connexion au flux SSE...").classes("text-grey-7")
 
         async def consume_stream() -> None:
             first = True
@@ -602,10 +759,26 @@ async def rapport_page(run_id: str) -> None:
             with ui.row().classes("items-center justify-between w-full"):
                 ui.label("Rapport final").classes("section-title text-4xl font-black text-primary")
                 badge_statut(rapport.get("status", "?"))
+            if rapport.get("fiche_poste"):
+                ui.label(rapport["fiche_poste"]).classes("text-base whitespace-pre-wrap break-words")
             with ui.row().classes("items-center gap-3 text-sm text-grey-7"):
-                ui.label(run_id).classes("font-mono")
                 ui.label(f"Démarré : {_format_date(rapport.get('started_at'))}")
                 ui.label(f"Terminé : {_format_date(rapport.get('finished_at'))}")
+            with ui.row().classes("gap-2"):
+                if report_markdown:
+                    ui.button(
+                        "Rapport (.md)",
+                        icon="download",
+                        on_click=lambda: ui.download.content(report_markdown, f"rapport-{run_id[:8]}.md"),
+                    ).props("outline")
+                if rapport.get("candidats"):
+                    ui.button(
+                        "Candidats (.csv)",
+                        icon="table_view",
+                        on_click=lambda: ui.download.content(
+                            _candidats_csv(rapport.get("candidats")), f"candidats-{run_id[:8]}.csv", "text/csv"
+                        ),
+                    ).props("outline")
 
         with ui.row().classes("w-full gap-3"):
             for label, value, tone in [
@@ -624,8 +797,12 @@ async def rapport_page(run_id: str) -> None:
             ui.label("Répartition des statuts").classes("text-2xl font-bold text-primary")
             ui.echart(_status_chart_options(stats)).classes("w-full h-80")
 
+        messages = rapport.get("messages") or []
+        urls = {c.get("candidat_id"): c.get("url") for c in rapport.get("candidats") or []}
+
         with ui.tabs().classes("w-full") as tabs:
             tab_candidats = ui.tab("Candidats", icon="groups")
+            tab_messages = ui.tab(f"Messages ({len(messages)})", icon="mail")
             tab_recherches = ui.tab("Recherches", icon="manage_search")
             tab_metriques = ui.tab("Métriques", icon="bar_chart")
             tab_rapport = ui.tab("Rapport complet", icon="article")
@@ -635,9 +812,33 @@ async def rapport_page(run_id: str) -> None:
                 with ui.card().classes("glass-card w-full p-5 gap-4"):
                     ui.label("Candidats du run").classes("text-2xl font-bold text-primary")
                     if rows:
-                        ui.table(columns=_candidate_columns(), rows=rows, row_key="nom").classes("w-full")
+                        _candidate_table(rapport.get("candidats"))
                     else:
-                        ui.label("Aucun candidat retourné pour ce run.").classes("text-grey-7")
+                        ui.label("Aucun candidat retourné pour cette recherche.").classes("text-grey-7")
+
+            with ui.tab_panel(tab_messages).classes("p-0"):
+                with ui.card().classes("glass-card w-full p-5 gap-4"):
+                    ui.label("Messages de contact").classes("text-2xl font-bold text-primary")
+                    if not messages:
+                        ui.label("Aucun message rédigé pour cette recherche.").classes("text-grey-7")
+                    for msg in messages:
+                        texte = f"Objet : {msg.get('objet', '')}\n\n{msg.get('message', '')}"
+                        with ui.card().classes("w-full p-4 gap-2"):
+                            with ui.row().classes("items-center justify-between w-full"):
+                                with ui.row().classes("items-center gap-2"):
+                                    url = urls.get(msg.get("candidat_id"))
+                                    if url:
+                                        ui.link(msg.get("nom", "Candidat"), url, new_tab=True).classes("font-bold")
+                                    else:
+                                        ui.label(msg.get("nom", "Candidat")).classes("font-bold")
+                                    ui.badge(msg.get("canal", "?"), color="secondary")
+                                ui.button(
+                                    "Copier",
+                                    icon="content_copy",
+                                    on_click=lambda t=texte: (ui.clipboard.write(t), ui.notify("Message copié")),
+                                ).props("flat")
+                            ui.label(f"Objet : {msg.get('objet', '')}").classes("font-medium")
+                            ui.label(msg.get("message", "")).classes("whitespace-pre-wrap text-sm")
 
             with ui.tab_panel(tab_recherches).classes("p-0"):
                 with ui.card().classes("glass-card w-full p-5 gap-4"):
@@ -707,13 +908,33 @@ async def rag_page() -> None:
             for label, value in [
                 ("Candidats mémorisés", summary.get("candidats", 0)),
                 ("Fiches de poste", summary.get("fiches_poste", 0)),
-                ("Répertoire", summary.get("persist_dir", "-")),
             ]:
                 with ui.card().classes("metric-card p-4 grow"):
                     ui.label(str(value)).classes("text-3xl font-black text-primary")
                     ui.label(label).classes("text-sm text-grey-7")
         if summary.get("error"):
             ui.label(summary["error"]).classes("text-negative")
+
+        async def vider() -> None:
+            with ui.dialog() as dialog, ui.card().classes("p-5 gap-4"):
+                ui.label("Effacer toute la mémoire (candidats évalués et fiches de poste) ?")
+                with ui.row().classes("justify-end w-full gap-2"):
+                    ui.button("Annuler", on_click=dialog.close).props("flat")
+
+                    async def valider() -> None:
+                        dialog.close()
+                        try:
+                            await clear_rag()
+                        except httpx.HTTPError as exc:
+                            ui.notify(f"Impossible de vider la mémoire : {_message_erreur(exc)}", type="negative")
+                            return
+                        ui.navigate.reload()
+
+                    ui.button("Effacer", color="negative", on_click=valider).props("unelevated")
+            dialog.open()
+
+        bouton_vider = ui.button("Vider la mémoire", icon="delete_sweep", on_click=vider).props("outline color=negative")
+        bouton_vider.set_visibility(not (await _etat_demo()).get("active"))
 
         with ui.card().classes("glass-card w-full p-5 gap-3"):
             ui.label("Recherche de profils similaires").classes("text-2xl font-bold text-primary")
@@ -769,7 +990,7 @@ async def rag_page() -> None:
 async def metrics_page() -> None:
     _install_theme()
     with page_frame("Métriques"):
-        ui.label("Observabilite").classes("section-title text-4xl font-black text-primary")
+        ui.label("Observabilité").classes("section-title text-4xl font-black text-primary")
         try:
             payload = await get_metrics_summary()
         except Exception as exc:  # noqa: BLE001
@@ -782,13 +1003,13 @@ async def metrics_page() -> None:
         with ui.row().classes("w-full gap-3"):
             with ui.card().classes("metric-card p-4 grow"):
                 ui.label(str(current.get("run_id", "-"))).classes("text-xl font-black text-primary")
-                ui.label("Run courant").classes("text-sm text-grey-7")
+                ui.label("Dernière recherche").classes("text-sm text-grey-7")
             with ui.card().classes("metric-card p-4 grow"):
                 ui.label(f"{current.get('duree_totale_s', 0)} s").classes("text-3xl font-black text-primary")
                 ui.label("Durée en mémoire").classes("text-sm text-grey-7")
             with ui.card().classes("metric-card p-4 grow"):
                 ui.label(str(len(current.get("etapes", {})))).classes("text-3xl font-black text-primary")
-                ui.label("Etapes tracees").classes("text-sm text-grey-7")
+                ui.label("Étapes tracées").classes("text-sm text-grey-7")
 
         rows = []
         for name, data in (current.get("etapes") or {}).items():
@@ -800,7 +1021,7 @@ async def metrics_page() -> None:
                 )[:220],
             })
         with ui.card().classes("glass-card w-full p-5"):
-            ui.label("Etapes du run courant").classes("text-2xl font-bold text-primary")
+            ui.label("Étapes de la dernière recherche").classes("text-2xl font-bold text-primary")
             if rows:
                 ui.table(
                     columns=[

@@ -5,6 +5,8 @@ cd "$(dirname "$0")"
 
 API_PORT="${API_PORT:-8000}"
 UI_PORT="${UI_PORT:-8080}"
+# Interface accessible seulement depuis cette machine (pas depuis le Wi-Fi partagé).
+UI_HOST="${UI_HOST:-127.0.0.1}"
 API_URL="${API_URL:-http://localhost:${API_PORT}}"
 
 # Environnement virtuel : .venv ou venv
@@ -42,11 +44,11 @@ cleanup() {
 trap cleanup INT TERM EXIT
 
 echo "Démarrage API sur http://localhost:${API_PORT}"
-"${VENV}/bin/uvicorn" src.api:app --reload --port "${API_PORT}" > logs/api_local.log 2>&1 &
+"${VENV}/bin/uvicorn" src.api:app --port "${API_PORT}" > logs/api_local.log 2>&1 &
 api_pid="$!"
 
 echo "Démarrage UI sur http://localhost:${UI_PORT}"
-API_URL="${API_URL}" UI_PORT="${UI_PORT}" "${VENV}/bin/python" -m src.ui.app > logs/ui_local.log 2>&1 &
+API_URL="${API_URL}" UI_HOST="${UI_HOST}" UI_PORT="${UI_PORT}" "${VENV}/bin/python" -m src.ui.app > logs/ui_local.log 2>&1 &
 ui_pid="$!"
 
 echo

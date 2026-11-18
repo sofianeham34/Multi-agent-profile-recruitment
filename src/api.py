@@ -17,6 +17,9 @@ from fastapi import FastAPI, BackgroundTasks, HTTPException, Query
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel
 
+from src.config import LLM_MODEL, LLM_PROVIDER
+from src import config as _cfg
+from src.state import etat_courant
 from src.graph import build_graph
 from src.config import graph_config
 from src.observabilite import reset_metrics, get_metrics
@@ -26,9 +29,9 @@ app = FastAPI(title="SMA Recrutement — API Gateway", version="1.1.0")
 # runs en mémoire : {run_id: RunInfo}
 _runs: dict[str, dict] = {}
 
-_HITL_TIMEOUT = 600  # secondes avant abandon HITL
-_LOGS_DIR = Path("logs")
-_CHROMA_DIR = Path("data/chromadb")
+_HITL_TIMEOUT = _cfg.HITL_TIMEOUT  # secondes avant abandon HITL
+_LOGS_DIR = Path(os.getenv("METRICS_DIR", "logs"))
+_CHROMA_DIR = Path(os.getenv("CHROMADB_DIR", "data/chromadb"))
 _RUNS_DB_PATH = Path(os.getenv("RUNS_DB_PATH", "data/runs.sqlite"))
 _METRICS_HISTORY_LIMIT = 20
 _DB_LOCK = threading.Lock()
@@ -49,8 +52,10 @@ class RecruterResponse(BaseModel):
 class RapportResponse(BaseModel):
     run_id: str
     status: str
+    fiche_poste: Optional[str] = None
     rapport: Optional[str] = None
     candidats: Optional[list] = None
+    messages: Optional[list] = None
     started_at: Optional[str] = None
     finished_at: Optional[str] = None
     erreur: Optional[str] = None
@@ -116,6 +121,10 @@ def _init_runs_db() -> None:
             )
             """
         )
+        # Bases créées avant l'enregistrement des messages de contact.
+        colonnes = {row[1] for row in conn.execute("PRAGMA table_info(runs)")}
+        if "messages_json" not in colonnes:
+            conn.execute("ALTER TABLE runs ADD COLUMN messages_json TEXT")
 
 
 def _save_run(run_id: str) -> None:
@@ -128,9 +137,9 @@ def _save_run(run_id: str) -> None:
             """
             INSERT INTO runs (
                 run_id, fiche_poste, status, rapport, candidats_json,
-                erreur, started_at, finished_at, with_interrupt
+                erreur, started_at, finished_at, with_interrupt, messages_json
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(run_id) DO UPDATE SET
                 fiche_poste=excluded.fiche_poste,
                 status=excluded.status,
@@ -139,7 +148,8 @@ def _save_run(run_id: str) -> None:
                 erreur=excluded.erreur,
                 started_at=excluded.started_at,
                 finished_at=excluded.finished_at,
-                with_interrupt=excluded.with_interrupt
+                with_interrupt=excluded.with_interrupt,
+                messages_json=excluded.messages_json
             """,
             (
                 run_id,
@@ -151,8 +161,17 @@ def _save_run(run_id: str) -> None:
                 info.get("started_at"),
                 info.get("finished_at"),
                 1 if info.get("_with_interrupt") else 0,
+                json.dumps(info.get("messages"), ensure_ascii=False),
             ),
         )
+
+
+def _delete_runs_db(run_ids: list[str]) -> None:
+    """Supprime des runs de l'historique SQLite."""
+    if not run_ids:
+        return
+    with _DB_LOCK, sqlite3.connect(_RUNS_DB_PATH) as conn:
+        conn.executemany("DELETE FROM runs WHERE run_id = ?", [(rid,) for rid in run_ids])
 
 
 def _load_runs_from_db() -> None:
@@ -167,12 +186,19 @@ def _load_runs_from_db() -> None:
             candidats = json.loads(row["candidats_json"]) if row["candidats_json"] else None
         except json.JSONDecodeError:
             candidats = None
+        try:
+            messages = json.loads(row["messages_json"]) if row["messages_json"] else None
+        except json.JSONDecodeError:
+            messages = None
         status = row["status"]
         erreur = row["erreur"]
         finished_at = row["finished_at"]
-        if status in ("running", "awaiting_hitl"):
-            status = "error"
-            erreur = "Run interrompu par redémarrage de l'API."
+        # Anciennes versions : une recherche coupée était enregistrée comme une erreur.
+        ancien_message = erreur == "Run interrompu par redémarrage de l'API."
+        if status in ("running", "awaiting_hitl") or (status == "error" and ancien_message):
+            # L'API s'est arrêtée pendant la recherche : ce n'est pas une erreur du pipeline.
+            status = "interrupted"
+            erreur = "Recherche interrompue : l'API a été arrêtée pendant l'exécution."
             finished_at = finished_at or datetime.now(timezone.utc).isoformat()
 
         info = {
@@ -181,6 +207,7 @@ def _load_runs_from_db() -> None:
             "status": status,
             "rapport": row["rapport"],
             "candidats": candidats,
+            "messages": messages,
             "erreur": erreur,
             "started_at": row["started_at"],
             "finished_at": finished_at,
@@ -228,7 +255,7 @@ def _run_pipeline(run_id: str, fiche_poste: str, with_interrupt: bool) -> None:
         # détection interrupt HITL
         state = app_graph.get_state(config)
         if with_interrupt and state.next:
-            candidats_en_attente = state.values.get("candidats_valides", [])
+            candidats_en_attente = etat_courant(state.values.get("candidats_valides", []))
             log.info(
                 "Run %s : interrupt détecté avant %s, %d candidat(s) en attente.",
                 run_id, state.next, len(candidats_en_attente),
@@ -262,9 +289,20 @@ def _run_pipeline(run_id: str, fiche_poste: str, with_interrupt: bool) -> None:
                 ]
                 app_graph.update_state(config, {"candidats_valides": modifies})
             elif decision["action"] == "edit":
-                app_graph.update_state(
-                    config, {"candidats_valides": decision.get("candidats_retenus", [])}
-                )
+                # La liste du graphe fonctionne en ajout : les candidats non retenus
+                # sont ajoutés en « invalide » pour que cette décision l'emporte.
+                # Marqués « choix_humain » : A7 rédige pour eux tous, sans seuil de score ni top-N.
+                retenus = [
+                    {**c, "statut": "valide", "choix_humain": True}
+                    for c in decision.get("candidats_retenus") or []
+                ]
+                ids_retenus = {c.get("candidat_id") for c in retenus}
+                non_retenus = [
+                    {**c, "statut": "invalide", "remarques": "Non retenu par la validation humaine"}
+                    for c in candidats_en_attente
+                    if c.get("candidat_id") not in ids_retenus
+                ]
+                app_graph.update_state(config, {"candidats_valides": non_retenus + retenus})
             # approve → reprise telle quelle
 
             _runs[run_id]["status"] = "running"
@@ -284,12 +322,14 @@ def _run_pipeline(run_id: str, fiche_poste: str, with_interrupt: bool) -> None:
         # état final
         final_state = app_graph.get_state(config)
         rapport = final_state.values.get("rapport_final", "")
-        candidats = final_state.values.get("candidats_valides", [])
+        candidats = etat_courant(final_state.values.get("candidats_valides", []))
+        messages_envoyes = final_state.values.get("messages_envoyes", [])
 
         _runs[run_id].update({
             "status": "done",
             "rapport": rapport,
             "candidats": candidats,
+            "messages": messages_envoyes,
             "finished_at": datetime.now(timezone.utc).isoformat(),
         })
         _save_run(run_id)
@@ -301,14 +341,16 @@ def _run_pipeline(run_id: str, fiche_poste: str, with_interrupt: bool) -> None:
 
     except Exception as exc:
         from src.logger import get_logger
+        from src.config import describe_llm_error
         get_logger("api").exception("Run %s : erreur pipeline.", run_id)
+        message = describe_llm_error(exc)
         _runs[run_id].update({
             "status": "error",
-            "erreur": str(exc),
+            "erreur": message,
             "finished_at": datetime.now(timezone.utc).isoformat(),
         })
         _save_run(run_id)
-        _push_event(run_id, "run_error", {"erreur": str(exc)})
+        _push_event(run_id, "run_error", {"erreur": message})
     finally:
         _close_event_stream(run_id)
 
@@ -526,6 +568,7 @@ def _run_pipeline_microservices(run_id: str, fiche_poste: str, with_interrupt: b
             "status": "done",
             "rapport": rapport,
             "candidats": candidats,
+            "messages": payload.get("messages_envoyes", []),
             "mode_execution": "microservices",
             "finished_at": datetime.now(timezone.utc).isoformat(),
         })
@@ -642,6 +685,31 @@ def _rag_counts() -> dict:
 _load_runs_from_db()
 
 
+_RUNS_ACTIFS = ("running", "awaiting_hitl")
+
+
+def _runs_du_jour() -> int:
+    """Recherches lancées aujourd'hui (UTC), pour le plafond de la démo publique."""
+    aujourdhui = datetime.now(timezone.utc).date().isoformat()
+    return sum(1 for r in _runs.values() if (r.get("started_at") or "").startswith(aujourdhui))
+
+
+def _etat_demo() -> dict:
+    if not _cfg.DEMO_PUBLIQUE:
+        return {"active": False}
+    return {
+        "active": True,
+        "max_par_jour": _cfg.DEMO_MAX_RUNS_JOUR,
+        "restantes": max(0, _cfg.DEMO_MAX_RUNS_JOUR - _runs_du_jour()),
+        "max_fiche": _cfg.DEMO_MAX_FICHE,
+    }
+
+
+def _refuser_en_demo() -> None:
+    if _cfg.DEMO_PUBLIQUE:
+        raise HTTPException(status_code=403, detail="Action désactivée sur la démo publique.")
+
+
 @app.get("/health", tags=["Monitoring"])
 async def health() -> JSONResponse:
     runs_total = len(_runs)
@@ -653,6 +721,8 @@ async def health() -> JSONResponse:
         "mode_execution": "microservices" if _SVC_ORCHESTRATEUR else "langgraph",
         "runs_total": runs_total,
         "runs_running": runs_running,
+        "llm": {"fournisseur": LLM_PROVIDER, "modele": LLM_MODEL},
+        "demo": _etat_demo(),
     })
 
 
@@ -663,6 +733,23 @@ async def recruter(
     """Lance un nouveau pipeline de recrutement."""
     if not req.fiche_poste.strip():
         raise HTTPException(status_code=422, detail="fiche_poste ne peut pas être vide.")
+    if _cfg.DEMO_PUBLIQUE:
+        if len(req.fiche_poste) > _cfg.DEMO_MAX_FICHE:
+            raise HTTPException(
+                status_code=422,
+                detail=f"Fiche trop longue pour la démo ({_cfg.DEMO_MAX_FICHE} caractères maximum).",
+            )
+        if any(r["status"] in _RUNS_ACTIFS for r in _runs.values()):
+            raise HTTPException(
+                status_code=429,
+                detail="Une recherche est déjà en cours sur la démo : réessayez dans quelques minutes.",
+            )
+        if _runs_du_jour() >= _cfg.DEMO_MAX_RUNS_JOUR:
+            raise HTTPException(
+                status_code=429,
+                detail=f"Limite de la démo atteinte pour aujourd'hui ({_cfg.DEMO_MAX_RUNS_JOUR} recherches) : "
+                "revenez demain ou consultez l'historique.",
+            )
 
     run_id = str(uuid.uuid4())
     _runs[run_id] = {
@@ -708,8 +795,10 @@ async def get_rapport(run_id: str) -> RapportResponse:
     return RapportResponse(
         run_id=run_id,
         status=info["status"],
+        fiche_poste=info.get("fiche_poste"),
         rapport=info.get("rapport"),
         candidats=info.get("candidats"),
+        messages=info.get("messages"),
         started_at=info.get("started_at"),
         finished_at=info.get("finished_at"),
         erreur=info.get("erreur"),
@@ -722,7 +811,7 @@ async def list_runs() -> JSONResponse:
         {
             "run_id": r["run_id"],
             "status": r["status"],
-            "fiche_poste": r.get("fiche_poste", "")[:120],
+            "fiche_poste": r.get("fiche_poste", ""),
             "mode_execution": r.get("mode_execution", "microservices" if _SVC_ORCHESTRATEUR else "langgraph"),
             "started_at": r.get("started_at"),
             "finished_at": r.get("finished_at"),
@@ -745,6 +834,21 @@ async def get_metrics_summary(
 
 @app.get("/rag", tags=["Monitoring"])
 async def get_rag_summary() -> JSONResponse:
+    return JSONResponse(_rag_counts())
+
+
+@app.delete("/rag", tags=["Monitoring"])
+async def clear_rag() -> JSONResponse:
+    """Vide la mémoire RAG (candidats évalués et fiches de poste)."""
+    _refuser_en_demo()
+    if any(r["status"] in _RUNS_ACTIFS for r in _runs.values()):
+        raise HTTPException(status_code=409, detail="Une recherche est en cours : attendez sa fin avant de vider la mémoire.")
+    try:
+        from src.tools.rag import get_memoire
+
+        get_memoire().vider()
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
     return JSONResponse(_rag_counts())
 
 
@@ -777,7 +881,7 @@ async def stream_run(run_id: str) -> StreamingResponse:
     q: queue.Queue = _runs[run_id]["_event_queue"]
 
     async def event_generator():
-        if _runs[run_id]["status"] in ("done", "error") and q.empty():
+        if _runs[run_id]["status"] in ("done", "error", "interrupted") and q.empty():
             yield "event: stream_closed\ndata: {}\n\n"
             return
         _HEARTBEAT_INTERVAL = 15.0  # heartbeat pour éviter timeout SSE
@@ -848,6 +952,30 @@ async def submit_hitl(run_id: str, decision: HitlDecision) -> JSONResponse:
         "action": decision.action,
         "message": "Décision prise en compte, reprise du pipeline en cours.",
     })
+
+
+@app.delete("/runs/{run_id}", tags=["Monitoring"])
+async def delete_run(run_id: str) -> JSONResponse:
+    """Supprime une recherche terminée de l'historique."""
+    _refuser_en_demo()
+    if run_id not in _runs:
+        raise HTTPException(status_code=404, detail=f"Run '{run_id}' introuvable.")
+    if _runs[run_id]["status"] in _RUNS_ACTIFS:
+        raise HTTPException(status_code=409, detail="Recherche en cours : annulez-la avant de la supprimer.")
+    del _runs[run_id]
+    _delete_runs_db([run_id])
+    return JSONResponse({"run_id": run_id, "message": "Recherche supprimée."})
+
+
+@app.delete("/runs", tags=["Monitoring"])
+async def delete_finished_runs() -> JSONResponse:
+    """Vide l'historique des recherches terminées (les recherches en cours sont gardées)."""
+    _refuser_en_demo()
+    termines = [rid for rid, r in _runs.items() if r["status"] not in _RUNS_ACTIFS]
+    for rid in termines:
+        del _runs[rid]
+    _delete_runs_db(termines)
+    return JSONResponse({"supprimes": len(termines)})
 
 
 @app.post("/runs/{run_id}/cancel", tags=["Pipeline"])

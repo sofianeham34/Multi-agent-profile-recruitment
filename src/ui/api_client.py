@@ -54,6 +54,22 @@ async def list_runs() -> list[dict]:
         return resp.json().get("runs", [])
 
 
+async def delete_run(run_id: str) -> dict:
+    """DELETE /runs/{run_id} — supprime une recherche terminée de l'historique."""
+    async with httpx.AsyncClient(timeout=_SHORT_TIMEOUT) as client:
+        resp = await client.delete(f"{API_URL}/runs/{run_id}")
+        resp.raise_for_status()
+        return resp.json()
+
+
+async def clear_runs() -> dict:
+    """DELETE /runs — vide l'historique des recherches terminées."""
+    async with httpx.AsyncClient(timeout=_SHORT_TIMEOUT) as client:
+        resp = await client.delete(f"{API_URL}/runs")
+        resp.raise_for_status()
+        return resp.json()
+
+
 async def cancel_run(run_id: str) -> dict:
     """POST /runs/{run_id}/cancel — annule un run en cours."""
     async with httpx.AsyncClient(timeout=_SHORT_TIMEOUT) as client:
@@ -99,6 +115,14 @@ async def get_rag_summary() -> dict:
     """GET /rag — état de la mémoire vectorielle."""
     async with httpx.AsyncClient(timeout=_SHORT_TIMEOUT) as client:
         resp = await client.get(f"{API_URL}/rag")
+        resp.raise_for_status()
+        return resp.json()
+
+
+async def clear_rag() -> dict:
+    """DELETE /rag — vide la mémoire RAG."""
+    async with httpx.AsyncClient(timeout=httpx.Timeout(30.0)) as client:
+        resp = await client.delete(f"{API_URL}/rag")
         resp.raise_for_status()
         return resp.json()
 

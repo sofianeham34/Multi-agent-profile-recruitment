@@ -69,11 +69,13 @@ def badge_statut(status: str) -> ui.element:
         "awaiting_hitl": "orange",
         "done": "green",
         "error": "red",
+        "interrupted": "grey",
     }
     libelle = {
         "running": "En cours",
-        "awaiting_hitl": "En attente HITL",
+        "awaiting_hitl": "En attente de votre validation",
         "done": "Terminé",
         "error": "Erreur",
+        "interrupted": "Interrompu",
     }
     return ui.badge(libelle.get(status, status), color=couleurs.get(status, "grey"))
