@@ -109,10 +109,16 @@ class TestRoutageConditionnel:
         ]}
         assert route_apres_verification(state) == "rapport"
 
-    def test_douteux_score_eleve_ne_route_pas_recruteur(self):
-        """Un profil douteux ne doit jamais etre contacte automatiquement."""
+    def test_douteux_viable_passe_par_la_validation_humaine(self):
+        """Un douteux viable est proposé à l'humain (l'interrupt précède A7)."""
         state = {"candidats_valides": [
             _valide(score=90.0, statut="douteux"),
+        ]}
+        assert route_apres_verification(state) == "recruteur"
+
+    def test_douteux_trop_faible_va_au_rapport(self):
+        state = {"candidats_valides": [
+            _valide(score=30.0, statut="douteux"),
         ]}
         assert route_apres_verification(state) == "rapport"
 
@@ -122,3 +128,111 @@ class TestRoutageConditionnel:
             _valide(score=60.0, statut="valide"),
         ]}
         assert route_apres_verification(state) == "recruteur"
+
+
+def test_selection_evaluation_lieu_puis_alternance_des_sources():
+    from src.graph import selection_evaluation
+
+    profils = (
+        [{"nom": f"li{i}", "source": "linkedin", "profil_brut": "Python dev"} for i in range(6)]
+        + [{"nom": "gh_mtp", "source": "github", "profil_brut": "Localisation: Montpellier"},
+           {"nom": "gh2", "source": "github", "profil_brut": "Python"},
+           {"nom": "so1", "source": "stackoverflow", "profil_brut": "Python"}]
+    )
+    choisis = [p["nom"] for p in selection_evaluation(profils, {"localisations": ["Montpellier"]}, 5)]
+    assert choisis[0] == "gh_mtp"  # lieu confirmé en premier
+    assert {"gh2", "so1"} <= set(choisis)  # chaque source a sa place
+    assert len(choisis) == 5
+
+
+def test_selection_evaluation_garde_tout_si_assez_de_places():
+    from src.graph import selection_evaluation
+
+    profils = [{"nom": "a", "source": "linkedin", "profil_brut": ""}]
+    assert selection_evaluation(profils, {}, 5) == profils
+
+
+def test_etat_courant_derniere_decision_l_emporte():
+    from src.state import etat_courant
+
+    liste = [
+        {"candidat_id": "a", "statut": "valide"},
+        {"candidat_id": "b", "statut": "valide"},
+        {"candidat_id": "a", "statut": "invalide"},
+    ]
+    assert etat_courant(liste) == [{"candidat_id": "b", "statut": "valide"}, {"candidat_id": "a", "statut": "invalide"}]
+
+
+def test_recruteur_ignore_un_candidat_rejete_par_l_humain():
+    from unittest import mock
+
+    from src.agents.recruteur import recruteur_node
+
+    alice = {"candidat_id": "c1", "nom": "Alice", "score_final": 90.0, "statut": "valide",
+             "remarques": "", "source": "github", "url": None}
+    etat = {"fiche_poste": "x", "candidats_valides": [alice, {**alice, "statut": "invalide"}]}
+    llm = mock.MagicMock()
+    with mock.patch("src.agents.recruteur.get_llm", return_value=llm):
+        assert recruteur_node(etat) == {"messages_envoyes": []}
+    llm.invoke.assert_not_called()
+
+
+def test_recruteur_ne_contacte_jamais_un_douteux_non_coche():
+    """Sans accord humain (statut resté « douteux »), aucun message n'est rédigé."""
+    from unittest import mock
+
+    from src.agents.recruteur import recruteur_node
+
+    bob = {"candidat_id": "c2", "nom": "Bob", "score_final": 90.0, "statut": "douteux",
+           "remarques": "", "source": "github", "url": None}
+    llm = mock.MagicMock()
+    with mock.patch("src.agents.recruteur.get_llm", return_value=llm):
+        assert recruteur_node({"fiche_poste": "x", "candidats_valides": [bob]}) == {"messages_envoyes": []}
+    llm.invoke.assert_not_called()
+
+
+def test_routage_apres_rejet_humain_va_au_rapport():
+    from src.graph import route_apres_verification
+
+    alice = {"candidat_id": "c1", "nom": "Alice", "score_final": 90.0, "statut": "valide"}
+    etat = {"candidats_valides": [alice, {**alice, "statut": "invalide"}]}
+    assert route_apres_verification(etat) == "rapport"
+
+
+def test_metriques_exportees_en_fin_de_pipeline():
+    import glob
+    import os
+
+    from src.agents.persistance import persistance_node
+
+    avant = set(glob.glob(os.path.join(os.environ["METRICS_DIR"], "metriques_*.json")))
+    persistance_node({"candidats_valides": [], "profils_dedupliques": [], "fiche_poste": ""})
+    apres = set(glob.glob(os.path.join(os.environ["METRICS_DIR"], "metriques_*.json")))
+    assert apres - avant
+
+
+def test_recruteur_redige_pour_toute_la_selection_humaine():
+    """Les candidats cochés ont tous un message, même sous le seuil ou au-delà du top-3."""
+    from unittest import mock
+
+    from src.agents.recruteur import recruteur_node
+
+    coches = [
+        {"candidat_id": f"c{i}", "nom": f"N{i}", "score_final": s, "statut": "valide",
+         "remarques": "", "source": "github", "url": None, "choix_humain": True}
+        for i, s in enumerate([35.0, 48.0, 43.0, 41.0, 60.0])
+    ]
+    non_coche = {"candidat_id": "z", "nom": "Z", "score_final": 90.0, "statut": "invalide",
+                 "remarques": "", "source": "github", "url": None}
+    capture = {}
+
+    def faux_invoke(llm, messages, **kw):
+        capture["prompt"] = messages[-1].content
+        return [{"candidat_id": c["candidat_id"], "nom": c["nom"], "message": "x"} for c in coches], None
+
+    with mock.patch("src.agents.recruteur.get_llm"), \
+         mock.patch("src.agents.recruteur.invoke_json", side_effect=faux_invoke):
+        res = recruteur_node({"fiche_poste": "x", "candidats_valides": coches + [non_coche]})
+    assert len(res["messages_envoyes"]) == 5
+    assert all(f"N{i}" in capture["prompt"] for i in range(5))
+    assert '"Z"' not in capture["prompt"]

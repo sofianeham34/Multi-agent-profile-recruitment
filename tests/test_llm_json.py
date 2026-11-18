@@ -50,3 +50,9 @@ def test_invoke_json_encapsule_un_objet_si_une_liste_est_attendue():
 def test_invoke_json_refuse_le_mauvais_type():
     with pytest.raises(LLMJsonError):
         invoke_json(_llm("[1, 2]", "[3]"), [], expected=dict)
+
+
+def test_contenu_en_blocs():
+    from src.llm_json import parse_json
+
+    assert parse_json([{"type": "text", "text": '{"score": 80}'}]) == {"score": 80}

@@ -263,3 +263,140 @@ class TestHitlEndpoint:
         assert resp.status_code == 200
         assert _runs[run_id]["_hitl_decision"]["action"] == "edit"
         assert _runs[run_id]["_hitl_decision"]["candidats_retenus"] == candidats
+
+
+class TestHistorique:
+    def _run(self, run_id, status):
+        from src.api import _internal_run_fields
+
+        info = {"run_id": run_id, "status": status, "fiche_poste": "Développeur Python, FastAPI, Montpellier",
+                "started_at": "2026-11-17T10:00:00+00:00"}
+        info.update(_internal_run_fields(info))
+        _runs[run_id] = info
+
+    def test_liste_renvoie_la_fiche_complete(self, client):
+        self._run("r1", "done")
+        _runs["r1"]["fiche_poste"] = "x" * 300
+        assert client.get("/runs").json()["runs"][0]["fiche_poste"] == "x" * 300
+
+    def test_supprimer_une_recherche_terminee(self, client):
+        self._run("r1", "done")
+        assert client.delete("/runs/r1").status_code == 200
+        assert "r1" not in _runs
+
+    def test_impossible_de_supprimer_une_recherche_en_cours(self, client):
+        self._run("r1", "running")
+        assert client.delete("/runs/r1").status_code == 409
+        assert "r1" in _runs
+
+    def test_vider_garde_les_recherches_en_cours(self, client):
+        self._run("fini", "done")
+        self._run("interrompu", "interrupted")
+        self._run("actif", "awaiting_hitl")
+        assert client.delete("/runs").json()["supprimes"] == 2
+        assert list(_runs) == ["actif"]
+
+    def test_recherche_coupee_par_un_redemarrage_marquee_interrompue(self):
+        import src.api as api
+
+        self._run("r1", "running")
+        api._save_run("r1")
+        _runs.clear()
+        api._load_runs_from_db()
+        assert _runs["r1"]["status"] == "interrupted"
+        assert "interrompue" in _runs["r1"]["erreur"]
+
+    def test_anciennes_entrees_en_erreur_relues_comme_interrompues(self):
+        import src.api as api
+
+        self._run("ancien", "error")
+        _runs["ancien"]["erreur"] = "Run interrompu par redémarrage de l'API."
+        api._save_run("ancien")
+        _runs.clear()
+        api._load_runs_from_db()
+        assert _runs["ancien"]["status"] == "interrupted"
+
+    def test_messages_persistes_et_renvoyes(self, client):
+        import src.api as api
+
+        self._run("r1", "done")
+        _runs["r1"]["messages"] = [{"nom": "Alice", "objet": "Poste", "message": "Bonjour", "canal": "email"}]
+        api._save_run("r1")
+        _runs.clear()
+        api._load_runs_from_db()
+        assert client.get("/rapport/r1").json()["messages"][0]["message"] == "Bonjour"
+
+    def test_vider_la_memoire_refuse_pendant_une_recherche(self, client):
+        self._run("r1", "running")
+        assert client.delete("/rag").status_code == 409
+
+    def test_health_indique_le_modele(self, client):
+        llm = client.get("/health").json()["llm"]
+        assert llm["fournisseur"] and llm["modele"]
+
+
+def test_vider_la_memoire_rag(tmp_path):
+    from src.tools.rag import MemoireRAG
+
+    m = MemoireRAG(persist_dir=str(tmp_path / "chroma"))
+    fid = m.ajouter_fiche_poste("Dev Python")
+    m.ajouter_candidat("c1", "Alice", "Python", 80.0, "github", fiche_id=fid)
+    m.vider()
+    assert m.compter() == 0 and m.compter_fiches() == 0
+
+
+class TestDemoPublique:
+    """Mode démo en ligne : quota et données protégés."""
+
+    @pytest.fixture(autouse=True)
+    def demo(self, monkeypatch):
+        from src import config
+
+        monkeypatch.setattr(config, "DEMO_PUBLIQUE", True)
+        monkeypatch.setattr(config, "DEMO_MAX_RUNS_JOUR", 2)
+        monkeypatch.setattr(config, "DEMO_MAX_FICHE", 50)
+
+    def _run(self, run_id, status, started_at=None):
+        from datetime import datetime, timezone
+
+        _runs[run_id] = {"run_id": run_id, "status": status, "fiche_poste": "x",
+                         "started_at": started_at or datetime.now(timezone.utc).isoformat()}
+
+    def test_health_annonce_les_recherches_restantes(self, client):
+        self._run("r1", "done")
+        demo = client.get("/health").json()["demo"]
+        assert demo == {"active": True, "max_par_jour": 2, "restantes": 1, "max_fiche": 50}
+
+    def test_une_seule_recherche_a_la_fois(self, client):
+        self._run("r1", "awaiting_hitl")
+        with patch("src.api._run_pipeline"):
+            resp = client.post("/recruter", json={"fiche_poste": "Dev Python"})
+        assert resp.status_code == 429
+        assert "déjà en cours" in resp.json()["detail"]
+
+    def test_plafond_journalier(self, client):
+        self._run("r1", "done")
+        self._run("r2", "error")
+        self._run("hier", "done", started_at="2020-01-01T10:00:00+00:00")
+        with patch("src.api._run_pipeline"):
+            resp = client.post("/recruter", json={"fiche_poste": "Dev Python"})
+        assert resp.status_code == 429
+        assert "aujourd'hui" in resp.json()["detail"]
+
+    def test_fiche_trop_longue(self, client):
+        assert client.post("/recruter", json={"fiche_poste": "x" * 51}).status_code == 422
+
+    def test_suppressions_desactivees(self, client):
+        self._run("r1", "done")
+        assert client.delete("/runs/r1").status_code == 403
+        assert client.delete("/runs").status_code == 403
+        assert client.delete("/rag").status_code == 403
+        assert "r1" in _runs
+
+    def test_recherche_acceptee_sous_le_plafond(self, client):
+        with patch("src.api._run_pipeline"):
+            assert client.post("/recruter", json={"fiche_poste": "Dev Python"}).status_code == 200
+
+
+def test_demo_desactivee_par_defaut(client):
+    assert client.get("/health").json()["demo"] == {"active": False}

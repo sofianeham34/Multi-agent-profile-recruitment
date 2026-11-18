@@ -1,5 +1,7 @@
 from src.agents.verificateur import (
     _adequation_minimale,
+    _localisation_confirmee,
+    revalider_candidat_connu,
     _profil_non_candidat,
     _profil_personne_probable,
 )
@@ -93,3 +95,52 @@ def test_parse_validation_json_accepte_markdown_et_texte():
         'Voici le résultat:\n```json\n{"candidat_id":"x","nom":"Alice","score_final":80,"statut":"valide","remarques":"ok"}\n```'
     )
     assert parsed["statut"] == "valide"
+
+
+def test_localisation_confirmee_par_ville_france_ou_linkedin_fr():
+    requis = {"localisations": ["Montpellier"]}
+    assert _localisation_confirmee(requis, "Alice", "Développeuse Python à Montpellier", "")[0]
+    assert _localisation_confirmee(requis, "Bob", "Backend Python, Lyon, France", "")[0]
+    assert _localisation_confirmee(requis, "Chloé", "Backend Python", "https://fr.linkedin.com/in/chloe")[0]
+
+
+def test_localisation_etrangere_ou_absente_non_confirmee():
+    requis = {"localisations": ["Montpellier"]}
+    ok, raison = _localisation_confirmee(requis, "Anna", "Python FastAPI", "https://in.linkedin.com/in/anna")
+    assert not ok and "autre pays" in raison
+    ok, raison = _localisation_confirmee(requis, "Raj", "Senior Python FastAPI developer", "https://www.linkedin.com/in/raj")
+    assert not ok and "non confirmée" in raison
+
+
+def test_sans_localisation_demandee_tout_passe():
+    assert _localisation_confirmee({"localisations": []}, "X", "Python", "https://in.linkedin.com/in/x")[0]
+
+
+_DATA_SCIENTIST = (
+    "Data Scientist freelance à Montpellier, spécialisé en forecasting, analyse causale et optimisation. "
+    "J'interviens sur l'ensemble du cycle de vie d'un projet data : compréhension du besoin, préparation des "
+    "données, modélisation, évaluation, industrialisation et restitution des résultats. Je conçois les briques "
+    "de mise en production : pipelines de données, orchestration, API, automatisation, déploiement et monitoring. "
+    "Environnement technique principal : Python, SQL, dbt, Airflow, FastAPI, Docker, AWS et Power BI. "
+    "Industrialisation avec Git, tests automatisés et pipelines CI/CD."
+)
+
+
+def test_candidat_memoire_ecarte_si_la_nouvelle_fiche_demande_d_autres_competences():
+    # Validé pour « Python, FastAPI, Docker » : ne doit pas être repris pour une fiche LangGraph + RAG.
+    requis = {"hard_skills": ["Python", "FastAPI", "LangGraph", "Docker", "RAG"],
+              "localisations": ["Montpellier"], "niveau_experience": "senior"}
+    ok, raison = revalider_candidat_connu(requis, "Thibault", _DATA_SCIENTIST, "https://fr.linkedin.com/in/t")
+    assert not ok and "LangGraph" in raison
+
+
+def test_candidat_memoire_repris_si_la_fiche_correspond():
+    profil = "Développeur backend à Montpellier. " + _DATA_SCIENTIST.split(". ", 1)[1]
+    requis = {"hard_skills": ["Python", "FastAPI", "Docker"], "localisations": ["Montpellier"],
+              "niveau_experience": "indifferent"}
+    ok, _ = revalider_candidat_connu(requis, "Léa", profil, "https://fr.linkedin.com/in/lea")
+    assert ok
+
+
+def test_candidat_memoire_trop_court_jamais_repris():
+    assert not revalider_candidat_connu({"hard_skills": ["Python"]}, "X", "Python", "")[0]

@@ -81,6 +81,17 @@ class TestAggregatedProfile:
         )
         assert _is_aggregated_profile(title, "") is True
 
+    def test_titres_tronques_concatenes_sans_le_mot_linkedin(self):
+        title = (
+            "Solal Goldstein - Développeur backend. Python (FastApi ..."
+            "Mohammed Eddahmani - Étudiant en Master Intelligence ..."
+            "Alexis FORQUIN - Étudiant ingénieur ISEP · Recherche une ..."
+        )
+        assert _is_aggregated_profile(title, "") is True
+
+    def test_profil_unique_tronque_non_signale(self):
+        assert _is_aggregated_profile("Rajender Reddy - Senior Python FastAPI Developer / Backend ...", "") is False
+
 
 class TestTriagePriority:
     def test_linkedin_profile_prioritaire(self):
@@ -131,3 +142,15 @@ class TestFiltreNode:
             resultat = filtre_node({"resultats_bruts": hits})
         assert len(resultat["profils_bruts"]) == 1
         assert "[Signal A3c]" in resultat["profils_bruts"][0]["profil_brut"]
+
+
+def test_resume_depots_github():
+    from src.tools.github_api import _resume_depots
+
+    lignes = _resume_depots([
+        {"name": "api-reservation", "description": "API FastAPI avec Docker", "language": "Python"},
+        {"name": "outils", "description": None, "language": "Python"},
+        {"name": "site", "description": "Portfolio", "language": "TypeScript"},
+    ])
+    assert lignes[0] == "Langages des dépôts : Python (2), TypeScript (1)"
+    assert "api-reservation : API FastAPI avec Docker [Python]" in lignes[1]

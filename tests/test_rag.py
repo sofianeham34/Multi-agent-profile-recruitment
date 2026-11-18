@@ -169,3 +169,25 @@ class TestCalibrationParFiche:
         )
         resultats = memoire.rechercher_similaires("Python developer", n_results=3)
         assert len(resultats) == 1
+
+
+class TestListeNoire:
+    def test_invalide_ecarte_pour_fiche_similaire_seulement(self, memoire):
+        fiche = "Développeur backend Python FastAPI Docker confirmé Montpellier"
+        fid = memoire.ajouter_fiche_poste(fiche)
+        memoire.ajouter_candidat(
+            "c1", "Étudiant", "Étudiant en master", 20.0, "linkedin",
+            fiche_id=fid, statut="invalide", url="https://fr.linkedin.com/in/etudiant",
+        )
+        url = "https://fr.linkedin.com/in/etudiant"
+        assert memoire.est_blackliste(url, "Développeur backend Python FastAPI Docker Montpellier", seuil_fiche=0.4)
+        # Un poste très différent (stage marketing) ne doit pas hériter de la liste noire
+        assert not memoire.est_blackliste(url, "Stage chef de projet marketing digital Lyon", seuil_fiche=0.9)
+
+    def test_valide_jamais_en_liste_noire(self, memoire):
+        fid = memoire.ajouter_fiche_poste("Dev Python Montpellier")
+        memoire.ajouter_candidat(
+            "c2", "Alice", "Python", 85.0, "github",
+            fiche_id=fid, statut="valide", url="https://github.com/alice",
+        )
+        assert not memoire.est_blackliste("https://github.com/alice", "Dev Python Montpellier")
