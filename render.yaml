@@ -1,0 +1,12 @@
+# Démo publique sur Render (offre gratuite) : New → Blueprint, puis choisir ce dépôt.
+services:
+  - type: web
+    name: recrutement-multi-agents
+    runtime: docker
+    plan: free
+    dockerfilePath: ./deploy/demo/Dockerfile
+    dockerContext: .
+    autoDeploy: false
+    envVars:
+      - key: OPENROUTER_API_KEY
+        sync: false  # saisie dans le tableau de bord Render, jamais dans le dépôt

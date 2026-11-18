@@ -3,3 +3,10 @@ __pycache__/
 *.pyc
 *.pyo
 .git/
+.env
+.venv/
+data/
+logs/
+Etudes/
+docs/
+tests/
