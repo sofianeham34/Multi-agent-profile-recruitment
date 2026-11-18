@@ -8,6 +8,7 @@ sous-champs (candidats_scores / candidats_valides) impose cette contrainte.
 
 import json
 import re
+from urllib.parse import urlparse
 from langchain_core.messages import SystemMessage, HumanMessage
 
 from src.state import GraphState, CandidatValide
@@ -32,9 +33,10 @@ Réponds UNIQUEMENT avec un objet JSON valide, sans markdown, sans texte autour 
 }
 
 Règles strictes :
-- "valide" uniquement si le profil décrit clairement une personne ET montre des compétences techniques liées au poste.
+- "valide" si le profil décrit clairement une personne ET montre le cœur du poste (métier technique, langage ou framework principal) sans contradiction avec la fiche (niveau, localisation).
+- Un profil public est incomplet : une compétence secondaire non mentionnée (Git, base de données, outil) ne suffit PAS à rendre un candidat douteux.
 - "invalide" si c'est une page entreprise, formation, article, annuaire, offre, professeur/cours, profil hors métier (banquier, immobilier, juriste, retraité, commercial...) ou profil clairement non-technique.
-- "douteux" si c'est une personne possible mais avec preuves insuffisantes ou incohérences.
+- "douteux" si le cœur du poste n'est pas prouvé, si le profil est presque vide, ou en cas d'incohérence réelle.
 - Ne remets JAMAIS score_final à 0 sauf si le profil est complètement hors sujet (score < 20).
 - Garde le score_global_A4 comme base et ajuste de ±20 maximum."""
 
@@ -193,6 +195,50 @@ def _profil_court(profil_brut: str, max_chars: int = 1600) -> str:
     return texte[:max_chars] + " [...]"
 
 
+def _localisation_confirmee(profil_requis: dict, nom: str, profil_brut: str, url: str) -> tuple[bool, str]:
+    """Vrai si le profil montre qu'il est dans la zone demandée (ville, France).
+
+    Les agents notent surtout les compétences : sans cette règle, un développeur
+    à l'autre bout du monde pouvait être validé pour un poste à Montpellier.
+    """
+    lieux = [l for l in profil_requis.get("localisations", []) if l]
+    if not lieux:
+        return True, ""
+    texte = _texte_normalise(nom, profil_brut)
+    if any(lieu.lower() in texte for lieu in lieux) or "france" in texte:
+        return True, ""
+    hote = (urlparse(url or "").hostname or "").lower()
+    if hote.startswith("fr."):
+        return True, ""
+    if re.fullmatch(r"[a-z]{2}\.linkedin\.com", hote):
+        return False, f"Profil LinkedIn d'un autre pays ({hote.split('.')[0]}) pour un poste à {', '.join(lieux)}."
+    return False, f"Localisation non confirmée : ni {', '.join(lieux)} ni la France n'apparaissent dans le profil."
+
+
+def revalider_candidat_connu(profil_requis: dict, nom: str, profil_brut: str, url: str) -> tuple[bool, str]:
+    """Revérifie un candidat issu de la mémoire face aux exigences de la fiche courante.
+
+    Sa validation datait d'une autre fiche : il ne repasse pas par A4/A5, donc les
+    règles sont plus strictes qu'en temps normal (deux tiers des compétences prouvées).
+    """
+    if len((profil_brut or "").strip()) < 400:
+        return False, "profil trop court pour être revérifié"
+    n_presentes, _, absentes = _preuves_competences(profil_requis, nom, profil_brut)
+    n_requises = len([s for s in profil_requis.get("hard_skills", []) if s])
+    if n_requises and n_presentes * 3 < n_requises * 2:
+        return False, f"compétences manquantes pour cette fiche : {', '.join(absentes[:4])}"
+    if not _role_tech_compatible(nom, profil_brut):
+        return False, "rôle technique compatible non prouvé"
+    ok, raison = _localisation_confirmee(profil_requis, nom, profil_brut, url)
+    if not ok:
+        return False, raison
+    niveau = profil_requis.get("niveau_experience", profil_requis.get("niveau_seniorite", "indifferent"))
+    incompatible, raison = _experience_incompatible(profil_brut, niveau)
+    if incompatible:
+        return False, raison
+    return True, ""
+
+
 def _verifier_candidat_llm(llm, profil_requis: dict, cs: dict, profil_source: dict) -> tuple[dict, object | None]:
     candidat_info = {
         "candidat_id": cs["candidat_id"],
@@ -323,6 +369,13 @@ def verificateur_node(state: dict) -> dict:
     ):
         statut = "valide"
         remarques = f"{remarques} Upgrade automatique : score >= {SCORE_SEUIL_CONTACT} sur profil LinkedIn individuel.".strip()
+
+    # Règle appliquée en dernier : aucun passage à "valide" sans localisation confirmée.
+    if statut == "valide":
+        ok, raison = _localisation_confirmee(profil_requis, nom, profil_brut, url or "")
+        if not ok:
+            statut = "douteux"
+            remarques = f"{remarques} {raison}".strip()
 
     candidat_valide = CandidatValide(
         candidat_id=candidat_id,

@@ -152,30 +152,36 @@ def _requetes_operateurs(profil: dict) -> dict:
 
 
 def _termes_experience(profil: dict) -> tuple[str, str]:
-    """Termes et exclusions selon le niveau d'expérience."""
+    """Terme et exclusions selon le niveau d'expérience.
+
+    Les moteurs de recherche traitent chaque terme entre guillemets comme obligatoire :
+    ajouter « "3 ans" "4 ans" "5 ans" » ne laissait presque aucun résultat. Le niveau
+    confirmé ou senior est donc vérifié par les agents d'évaluation, pas dans la requête ;
+    seuls les profils étudiants ou juniors reçoivent un terme et des exclusions.
+    """
     niveau = profil.get("niveau_experience", profil.get("niveau_seniorite", "indifferent"))
     contrat = profil.get("type_contrat", "indifferent")
-    if niveau == "alternant":
-        return f'"alternance" "alternant" apprenti étudiant junior', '-"senior" -"lead" -"confirmé" -"confirme" -"manager"'
-    if niveau == "stagiaire":
-        return f'"stage" stagiaire étudiant junior', '-"senior" -"lead" -"confirmé" -"confirme" -"manager"'
+    exclusions_junior = '-"senior" -"lead" -"confirmé" -"confirme" -"manager"'
+    if niveau == "alternant" or contrat == "alternance":
+        return '"alternance"', exclusions_junior
+    if niveau == "stagiaire" or contrat == "stage":
+        return '"stage"', exclusions_junior
     if niveau == "junior":
-        return '"junior" débutant "0 ans" "1 an" "2 ans"', '-"senior" -"lead" -"manager"'
-    if niveau == "confirme":
-        return '"confirmé" "3 ans" "4 ans" "5 ans"', ""
-    if niveau == "senior":
-        return '"senior" "5 ans" "6 ans" "7 ans"', ""
-    if contrat in ("alternance", "stage"):
-        return f'"{contrat}" étudiant junior', '-"senior" -"lead" -"manager"'
+        return '"junior"', '-"senior" -"lead" -"manager"'
     return "", ""
 
 
 def _termes_lieu(profil: dict) -> str:
-    lieux = [l for l in profil.get("localisations", []) if l]
-    termes = " ".join(f'"{lieu}" environs' for lieu in lieux)
-    if profil.get("remote"):
-        termes = f"{termes} télétravail remote hybride".strip()
-    return termes
+    """Lieu principal entre guillemets (le télétravail n'est pas un critère de recherche)."""
+    lieu = _lieu_principal(profil)
+    return _quote(lieu) if lieu else ""
+
+
+def _ajouter_si_absent(requete: str, terme: str) -> str:
+    """Ajoute un terme à la requête seulement s'il n'y figure pas déjà."""
+    if not terme or terme.strip('"').lower() in requete.lower():
+        return requete
+    return f"{requete} {terme}"
 
 
 def _enrichir_requetes(requetes: dict, profil: dict) -> dict:
@@ -185,15 +191,25 @@ def _enrichir_requetes(requetes: dict, profil: dict) -> dict:
 
     termes_exp, exclusions = _termes_experience(profil)
     termes_lieu = _termes_lieu(profil)
-    suffixe = " ".join(t for t in (termes_exp, termes_lieu, exclusions) if t).strip()
 
-    if suffixe:
-        for key in ("queries_generales", "queries_linkedin", "queries_cv_sites"):
-            requetes[key] = [f"{q} {suffixe}".strip() for q in requetes.get(key, [])]
+    for key in ("queries_generales", "queries_linkedin", "queries_cv_sites"):
+        enrichies = []
+        for q in requetes.get(key, []):
+            for terme in (termes_lieu, termes_exp, exclusions):
+                q = _ajouter_si_absent(q, terme)
+            enrichies.append(" ".join(q.split()))
+        requetes[key] = enrichies
 
-        github_suffix = " ".join(t for t in (termes_exp.replace('"', ""), termes_lieu.replace('"', "")) if t).strip()
-        if github_suffix:
-            requetes["queries_github"] = [f"{q} {github_suffix}".strip() for q in requetes.get("queries_github", [])]
+    # API GitHub : seuls les opérateurs natifs filtrent ; un mot libre ajouté à la
+    # requête doit apparaître dans le nom ou la bio et éliminerait presque tout.
+    lieu = _lieu_principal(profil)
+    enrichies = []
+    for q in requetes.get("queries_github", []):
+        q = q.replace('"', "")
+        if lieu and "location:" not in q:
+            q = f"{q} location:{lieu}"
+        enrichies.append(" ".join(q.split()))
+    requetes["queries_github"] = enrichies
 
     requetes["queries_generales"] = _dedup_liste(requetes.get("queries_generales", []), 4)
     requetes["queries_linkedin"] = _dedup_liste(requetes.get("queries_linkedin", []), 4)

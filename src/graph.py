@@ -4,7 +4,7 @@ from langgraph.graph import StateGraph, START, END
 from langgraph.types import Send
 from langgraph.checkpoint.memory import MemorySaver
 
-from src.state import GraphState
+from src.state import GraphState, etat_courant
 from src.config import SCORE_SEUIL_CONTACT, SCORE_SEUIL_HUMAIN, SCORE_SEUIL_VIABLE, TOP_N_RELATIF, MAX_PROFILS_PARALLELES
 from src.logger import get_logger
 from src.observabilite import get_metrics
@@ -24,6 +24,38 @@ from src.agents.persistance import persistance_node
 from src.agents.injection_rag import injection_rag_node
 
 
+def selection_evaluation(profils: list, profil_requis: dict, n: int) -> list:
+    """Choisit les n profils à évaluer quand il y en a trop.
+
+    D'abord ceux dont le profil mentionne le lieu demandé (ou la France), puis une
+    alternance entre les sources : sans cela, LinkedIn, trié en premier par le
+    filtre, occupait toutes les places et les profils GitHub n'étaient jamais évalués.
+    L'ordre de priorité du filtre est conservé à l'intérieur de chaque source.
+    """
+    lieux = [l.lower() for l in profil_requis.get("localisations", []) if l]
+
+    def lieu_mentionne(p) -> bool:
+        texte = f"{p.get('nom', '')} {p.get('profil_brut', '')}".lower()
+        return bool(lieux) and (any(l in texte for l in lieux) or "france" in texte)
+
+    choisis: list = []
+    for groupe in ([p for p in profils if lieu_mentionne(p)], [p for p in profils if not lieu_mentionne(p)]):
+        par_source: dict[str, list] = {}
+        for p in groupe:
+            par_source.setdefault(p.get("source", ""), []).append(p)
+        files = list(par_source.values())
+        while files and len(choisis) < n:
+            for file in list(files):
+                if len(choisis) >= n:
+                    break
+                choisis.append(file.pop(0))
+                if not file:
+                    files.remove(file)
+        if len(choisis) >= n:
+            break
+    return choisis
+
+
 def route_to_evaluateurs(state: GraphState) -> list[Send]:
     """Fan-out : un Send() par profil vers A4."""
     profils = state.get("profils_dedupliques", [])
@@ -33,11 +65,11 @@ def route_to_evaluateurs(state: GraphState) -> list[Send]:
 
     # limite instances parallèles
     if len(profils) > MAX_PROFILS_PARALLELES:
-        _log.warning(
-            "%d profils disponibles, limite à %d évaluateurs parallèles (MAX_PROFILS_PARALLELES).",
+        _log.info(
+            "%d profils disponibles, sélection de %d pour l'évaluation (MAX_PROFILS_PARALLELES).",
             len(profils), MAX_PROFILS_PARALLELES,
         )
-        profils = profils[:MAX_PROFILS_PARALLELES]
+        profils = selection_evaluation(profils, state.get("profil_competences", {}), MAX_PROFILS_PARALLELES)
 
     _log.info("Fan-out : %d profils vers évaluateurs.", len(profils))
     return [
@@ -72,11 +104,22 @@ def route_to_verificateurs(state: GraphState) -> list[Send]:
 def route_apres_verification(state: GraphState) -> str:
     """Routage conditionnel après A5 : recruteur ou rapport."""
     candidats_valides = [
-        c for c in state.get("candidats_valides", [])
+        c for c in etat_courant(state.get("candidats_valides", []))
         if c.get("statut") == "valide"
     ]
 
     if not candidats_valides:
+        # Les profils publics sont incomplets : un bon candidat finit souvent « douteux ».
+        # On passe quand même par la validation humaine ; A7 n'écrit qu'aux candidats
+        # que l'humain a cochés (passés en « valide »), donc rien n'est envoyé seul.
+        a_verifier = [
+            c for c in etat_courant(state.get("candidats_valides", []))
+            if c.get("statut") == "douteux" and c.get("score_final", 0) >= SCORE_SEUIL_VIABLE
+        ]
+        if a_verifier:
+            _log.info("Routage : aucun valide, %d douteux viable(s) -> validation humaine.", len(a_verifier))
+            get_metrics().noter("routage", decision="recruteur", mode="douteux_a_verifier", n=len(a_verifier))
+            return "recruteur"
         _log.info("Routage : aucun candidat validé -> rapport.")
         get_metrics().noter("routage", decision="rapport", raison="aucun_candidat")
         return "rapport"

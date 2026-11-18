@@ -43,3 +43,18 @@ class GraphState(TypedDict):
     messages_envoyes: Annotated[list[dict], operator.add]         # A7
     rapport_final: str                                            # A1
     messages: Annotated[list, add_messages]                       # trace LLM
+
+
+def etat_courant(candidats: list[dict]) -> list[dict]:
+    """Dernière décision connue pour chaque candidat.
+
+    candidats_valides fonctionne en ajout (operator.add) : une décision humaine
+    ou une correction ajoute une nouvelle version du candidat au lieu de remplacer
+    l'ancienne. La dernière version l'emporte ; l'ordre d'apparition est conservé.
+    """
+    courant: dict[str, dict] = {}
+    for c in candidats or []:
+        cle = c.get("candidat_id") or c.get("url") or c.get("nom")
+        courant.pop(cle, None)
+        courant[cle] = c
+    return list(courant.values())

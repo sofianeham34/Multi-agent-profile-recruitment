@@ -36,18 +36,28 @@ def injection_rag_node(state: GraphState) -> dict:
         m.fin("injection_rag", n_injectes=0)
         return {}
 
+    from src.agents.verificateur import revalider_candidat_connu
+
+    profil_requis = state.get("profil_competences", {})
     nouveaux: list[CandidatValide] = []
+    n_ecartes = 0
     for c in connus:
         if c.get("url") in urls_actuels:
             continue
         if c["candidat_id"] in ids_actuels:
+            continue
+        # Validé pour une autre fiche : il doit satisfaire les exigences de celle-ci.
+        ok, raison = revalider_candidat_connu(profil_requis, c["nom"], c.get("profil_brut", ""), c.get("url") or "")
+        if not ok:
+            n_ecartes += 1
+            _log.info("RAG injection : %s écarté (%s).", c["nom"][:40], raison)
             continue
         nouveaux.append(CandidatValide(
             candidat_id=c["candidat_id"],
             nom=c["nom"],
             score_final=c["score"],
             statut="valide",
-            remarques=f"[RAG] Candidat connu (run précédent). {c['remarques'][:120]}".strip(),
+            remarques=f"[RAG] Candidat connu, revérifié pour cette fiche. {c['remarques'][:120]}".strip(),
             source=c.get("source") or "profil déjà récupéré",
             url=c.get("url") or None,
         ))
@@ -58,5 +68,5 @@ def injection_rag_node(state: GraphState) -> dict:
     else:
         _log.info("RAG injection : aucun nouveau candidat connu pour cette fiche.")
 
-    m.fin("injection_rag", n_injectes=len(nouveaux))
+    m.fin("injection_rag", n_injectes=len(nouveaux), n_ecartes=n_ecartes)
     return {"candidats_valides": nouveaux} if nouveaux else {}

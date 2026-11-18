@@ -14,6 +14,7 @@ Output :
     profils_bruts : list[Candidat]  — profils enrichis, prêts pour A6
 """
 
+import re
 import uuid
 
 from src.state import GraphState, Candidat
@@ -154,6 +155,10 @@ def _is_aggregated_profile(title: str, profil_brut: str) -> bool:
         return True
     if title.count(" - ") >= 4 and title_lower.count("linkedin") >= 1:
         return True
+    # Titres tronqués mis bout à bout, sans le mot LinkedIn :
+    # "Nom1 - Titre1 ...Nom2 - Titre2 ...Nom3 - Titre3 ..."
+    if len(re.findall(r"\.\.\.\s*[A-ZÀ-Ý]", title)) >= 2:
+        return True
     return False
 
 
@@ -223,6 +228,24 @@ def filtre_node(state: GraphState) -> dict:
         n_url_drop, len(pre_filtered),
     )
 
+    # Profils déjà jugés invalides pour un poste similaire : ni scraping ni appel LLM.
+    n_blacklist = 0
+    fiche_poste = state.get("fiche_poste", "")
+    try:
+        from src.tools.rag import get_memoire
+        memoire = get_memoire()
+        conserves = []
+        for h in pre_filtered:
+            if memoire.est_blackliste(h.get("url", ""), fiche_poste or None):
+                n_blacklist += 1
+                continue
+            conserves.append(h)
+        pre_filtered = conserves
+    except Exception as exc:
+        _log.debug("Liste noire RAG ignorée : %s", exc)
+    if n_blacklist:
+        _log.info("Liste noire RAG : %d profil(s) déjà jugé(s) invalide(s) écarté(s).", n_blacklist)
+
     # Limiter le nombre de pages à scraper (marge pour le post-filtre)
     a_scraper = pre_filtered[: MAX_PROFILS_RECHERCHE * 3]
 
@@ -242,7 +265,11 @@ def filtre_node(state: GraphState) -> dict:
             profil_brut = f"{h.get('title', '')}\n\n{h.get('body', '')}"
             n_scrape_fail += 1
         else:
-            profil_brut = scraped
+            # Le titre et le résumé de la source (bio et localisation de l'API GitHub,
+            # extrait du moteur de recherche) restent en tête : la page lue ne les
+            # reprend pas toujours.
+            entete = f"{h.get('title', '')}\n{h.get('body', '')}".strip()
+            profil_brut = f"{entete}\n\n{scraped}" if entete else scraped
 
         # Post-filtre strict : on retire seulement les pages agrégées qui
         # mélangent plusieurs personnes dans un seul résultat.
@@ -289,6 +316,7 @@ def filtre_node(state: GraphState) -> dict:
         n_sortie=len(candidats),
         n_drop_url=n_url_drop,
         n_pages_signalees=n_pages_signalees,
+        n_blacklist=n_blacklist,
         n_drop_post=n_post_drop,
         taux_bruit=taux_bruit,
         n_scrape_fail=n_scrape_fail,

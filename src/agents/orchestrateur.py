@@ -11,7 +11,7 @@ réduction des scores (fan-in après Send).
 
 from langchain_core.messages import HumanMessage
 
-from src.state import GraphState
+from src.state import GraphState, etat_courant
 from src.observabilite import get_metrics
 from src.logger import get_logger
 
@@ -49,7 +49,7 @@ def reduce_scores_node(state: GraphState) -> dict:
 def reduce_validations_node(state: GraphState) -> dict:
     """Nœud de réduction : agrège les validations A5 parallèles."""
     log = get_logger("reduce")
-    candidats = state.get("candidats_valides", [])
+    candidats = etat_courant(state.get("candidats_valides", []))
     n_valides = sum(1 for c in candidats if c.get("statut") == "valide")
     n_douteux = sum(1 for c in candidats if c.get("statut") == "douteux")
     n_invalides = sum(1 for c in candidats if c.get("statut") == "invalide")
@@ -136,7 +136,7 @@ def rapport_node(state: GraphState) -> dict:
     n_bruts = len(state.get("profils_bruts", []))
     n_hits_bruts = len(state.get("resultats_bruts", []))
     n_dedup = len(state.get("profils_dedupliques", []))
-    candidats_verifies = state.get("candidats_valides", [])
+    candidats_verifies = etat_courant(state.get("candidats_valides", []))
     candidats_valides = [c for c in candidats_verifies if c.get("statut") == "valide"]
     candidats_douteux = [c for c in candidats_verifies if c.get("statut") == "douteux"]
     candidats_invalides = [c for c in candidats_verifies if c.get("statut") == "invalide"]
@@ -160,8 +160,10 @@ def rapport_node(state: GraphState) -> dict:
 
     messages_section = "Aucun message généré."
     if messages_envoyes:
-        messages_section = "\n".join(
-            f"- {msg.get('nom', 'Candidat')} ({msg.get('canal', 'canal non précisé')}) : {msg.get('objet', 'Sans objet')}"
+        messages_section = "\n\n".join(
+            f"### {msg.get('nom', 'Candidat')} ({msg.get('canal', 'canal non précisé')})\n"
+            f"**Objet :** {msg.get('objet', 'Sans objet')}\n\n"
+            + "\n".join(f"> {ligne}" if ligne else ">" for ligne in str(msg.get("message", "")).splitlines())
             for msg in messages_envoyes
         )
 

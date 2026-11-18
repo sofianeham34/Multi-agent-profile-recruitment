@@ -84,8 +84,9 @@ class PipelineMetrics:
         }
 
         if chemin is None:
-            os.makedirs("logs", exist_ok=True)
-            chemin = f"logs/metriques_{self._run_id}.json"
+            dossier = os.getenv("METRICS_DIR", "logs")
+            os.makedirs(dossier, exist_ok=True)
+            chemin = os.path.join(dossier, f"metriques_{self._run_id}.json")
 
         with open(chemin, "w", encoding="utf-8") as f:
             json.dump(rapport, f, ensure_ascii=False, indent=2, default=str)

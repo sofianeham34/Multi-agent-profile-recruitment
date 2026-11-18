@@ -21,6 +21,14 @@ _log = get_logger("A8_persistance")
 
 
 def persistance_node(state: GraphState) -> dict:
+    """Dernier nœud du graphe : persiste en mémoire puis exporte les métriques du run."""
+    try:
+        return _persister(state)
+    finally:
+        _exporter_metriques()
+
+
+def _persister(state: GraphState) -> dict:
     """Stocke la fiche de poste courante + les candidats validés,
     reliés via un fiche_id stable. Le lien fiche↔candidat permet à A4
     de filtrer les runs précédents par pertinence de contexte."""
@@ -108,3 +116,11 @@ def persistance_node(state: GraphState) -> dict:
     )
 
     return {}
+
+
+def _exporter_metriques() -> None:
+    """Exporte les métriques du run en JSON (lues par la page Métriques)."""
+    try:
+        get_metrics().exporter()
+    except Exception as exc:
+        _log.warning("Export des métriques impossible : %s", exc)

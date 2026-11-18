@@ -46,6 +46,42 @@ def _get_user_profile(login: str, hdrs: dict) -> dict:
         return {}
 
 
+def _get_recent_repos(login: str, hdrs: dict, n: int = 10) -> list[dict]:
+    """Dépôts personnels récemment mis à jour (hors forks) : la meilleure preuve de compétences."""
+    try:
+        resp = requests.get(
+            f"{_GITHUB_API}/users/{login}/repos",
+            params={"sort": "pushed", "per_page": n, "type": "owner"},
+            headers=hdrs,
+            timeout=8,
+        )
+        if resp.status_code == 200:
+            return [r for r in resp.json() if not r.get("fork")]
+    except Exception:
+        pass
+    return []
+
+
+def _resume_depots(repos: list[dict]) -> list[str]:
+    """Langages dominants et projets récents, en texte lisible pour les agents."""
+    lignes = []
+    langages: dict[str, int] = {}
+    for r in repos:
+        if r.get("language"):
+            langages[r["language"]] = langages.get(r["language"], 0) + 1
+    if langages:
+        tri = sorted(langages.items(), key=lambda kv: kv[1], reverse=True)
+        lignes.append("Langages des dépôts : " + ", ".join(f"{lang} ({n})" for lang, n in tri[:6]))
+    projets = []
+    for r in repos[:6]:
+        desc = (r.get("description") or "").strip()
+        projets.append(f"- {r.get('name', '?')}" + (f" : {desc[:120]}" if desc else "")
+                       + (f" [{r['language']}]" if r.get("language") else ""))
+    if projets:
+        lignes.append("Projets récents :\n" + "\n".join(projets))
+    return lignes
+
+
 def search_github_users(query: str, max_results: int = 5) -> list[dict]:
     """Recherche des utilisateurs GitHub par compétences / localisation.
 
@@ -110,6 +146,7 @@ def search_github_users(query: str, max_results: int = 5) -> list[dict]:
         if company:
             body_parts.append(f"Entreprise: {company}")
         body_parts.append(f"Dépôts publics: {repos} | Followers: {followers}")
+        body_parts.extend(_resume_depots(_get_recent_repos(login, hdrs)))
         body = "\n".join(body_parts)
 
         results.append({

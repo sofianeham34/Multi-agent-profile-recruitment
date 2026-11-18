@@ -1,7 +1,8 @@
 """
 A7 — Recruteur.
 
-Rédige des messages personnalisés et les envoie aux meilleurs candidats.
+Rédige des messages personnalisés pour les meilleurs candidats. Rien n'est
+envoyé : les messages sont à copier depuis le rapport.
 Déclenché conditionnellement par A5 uniquement si le score dépasse le seuil.
 Réactivité événementielle.
 """
@@ -9,7 +10,7 @@ Réactivité événementielle.
 import json
 from langchain_core.messages import SystemMessage, HumanMessage
 
-from src.state import GraphState
+from src.state import GraphState, etat_courant
 from src.config import get_llm, SCORE_SEUIL_CONTACT, SCORE_SEUIL_VIABLE, TOP_N_RELATIF
 from src.llm_json import invoke_json, LLMJsonError
 from src.prompts import RECRUTEUR_SYSTEM
@@ -29,7 +30,7 @@ def recruteur_node(state: GraphState) -> dict:
     m = get_metrics()
     m.debut("A7_recruteur")
     candidats_valides = [
-        c for c in state.get("candidats_valides", [])
+        c for c in etat_courant(state.get("candidats_valides", []))
         if c.get("statut") == "valide"
     ]
     fiche_poste = state.get("fiche_poste", "")
@@ -41,7 +42,12 @@ def recruteur_node(state: GraphState) -> dict:
     ]
 
     mode = "absolu"
-    if not top_candidats:
+    # Après la validation humaine, la sélection de l'humain remplace les seuils.
+    choisis = [c for c in candidats_valides if c.get("choix_humain")]
+    if choisis:
+        top_candidats = choisis
+        mode = "humain"
+    elif not top_candidats:
         # Mode relatif : top-N parmi les viables
         viables = sorted(
             [c for c in candidats_valides if c["score_final"] >= SCORE_SEUIL_VIABLE],
@@ -54,7 +60,7 @@ def recruteur_node(state: GraphState) -> dict:
     _log.info(
         "%d candidat(s) sélectionné(s) [mode %s, seuil %s].",
         len(top_candidats), mode,
-        SCORE_SEUIL_CONTACT if mode == "absolu" else f">={SCORE_SEUIL_VIABLE} top-{TOP_N_RELATIF}"
+        {"absolu": SCORE_SEUIL_CONTACT, "humain": "sélection humaine"}.get(mode, f">={SCORE_SEUIL_VIABLE} top-{TOP_N_RELATIF}")
     )
 
     if not top_candidats:

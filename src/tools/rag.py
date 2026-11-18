@@ -242,7 +242,7 @@ class MemoireRAG:
     def get_candidats_connus(
         self,
         fiche_poste: str,
-        seuil_fiche: float = 0.75,
+        seuil_fiche: float = 0.85,
         max_age_jours: int = 30,
     ) -> list[dict]:
         """Retourne les candidats validés pour une fiche similaire, récents.
@@ -250,7 +250,8 @@ class MemoireRAG:
         Utilisé par injection_rag pour compléter les résultats d'un run
         avec des profils déjà connus depuis la mémoire inter-runs.
 
-        Returns liste de dicts {candidat_id, nom, score, source, remarques, url}.
+        Returns liste de dicts {candidat_id, nom, score, source, remarques, url, profil_brut}.
+        Le profil est renvoyé pour être revérifié face aux exigences de la fiche courante.
         """
         if self._candidats.count() == 0 or not fiche_poste.strip():
             return []
@@ -270,7 +271,7 @@ class MemoireRAG:
                     {"fiche_id": {"$in": sorted(fiche_ids_ok)}},
                     {"last_seen": {"$gte": cutoff}},
                 ]},
-                include=["metadatas"],
+                include=["metadatas", "documents"],
             )
         except Exception as e:
             _log.warning("Erreur get_candidats_connus : %s", e)
@@ -278,9 +279,10 @@ class MemoireRAG:
 
         ids = results.get("ids", [])
         metas = results.get("metadatas", []) or []
+        documents = results.get("documents", []) or [""] * len(ids)
 
         connus = []
-        for cid, meta in zip(ids, metas):
+        for cid, meta, document in zip(ids, metas, documents):
             if meta.get("fiche_id", "") not in fiche_ids_ok:
                 continue
             if meta.get("last_seen", 0) < cutoff:
@@ -292,15 +294,17 @@ class MemoireRAG:
                 "source": meta.get("source", ""),
                 "remarques": meta.get("remarques", ""),
                 "url": meta.get("url", ""),
+                "profil_brut": document or "",
             })
 
         connus.sort(key=lambda x: x["score"], reverse=True)
         return connus[:10]
 
-    def est_blackliste(self, url: str) -> bool:
-        """Vrai si cette URL a déjà été évaluée et marquée invalide.
+    def est_blackliste(self, url: str, fiche_poste: str | None = None, seuil_fiche: float = 0.85) -> bool:
+        """Vrai si cette URL a déjà été jugée invalide pour une fiche de poste similaire.
 
-        Requête purement metadata (pas d'embedding) → très rapide.
+        Un profil écarté pour un poste confirmé peut convenir à un stage : la liste
+        noire ne s'applique donc qu'aux fiches proches de la fiche courante.
         Retourne False en cas d'erreur pour ne jamais bloquer le pipeline.
         """
         if not url or self._candidats.count() == 0:
@@ -311,7 +315,11 @@ class MemoireRAG:
                 include=["metadatas"],
                 limit=10,
             )
-            return any(m.get("statut") == "invalide" for m in results.get("metadatas", []))
+            metas = [m for m in results.get("metadatas", []) if m.get("statut") == "invalide"]
+            if metas and fiche_poste is not None:
+                fiche_ids_ok = set(self._fiches_similaires_ids(fiche_poste, seuil_fiche))
+                metas = [m for m in metas if m.get("fiche_id", "") in fiche_ids_ok]
+            return bool(metas)
         except Exception as e:
             _log.debug("Blacklist check ignoré (champ manquant ou erreur) : %s", e)
             return False
@@ -360,6 +368,17 @@ class MemoireRAG:
             "source": best.get("source", "?"),
             "remarques": best.get("remarques", ""),
         }
+
+    def vider(self) -> None:
+        """Efface toute la mémoire (candidats et fiches de poste)."""
+        for name in (_CANDIDATS_COLLECTION, _FICHES_COLLECTION):
+            try:
+                self._client.delete_collection(name)
+            except Exception as e:
+                _log.debug("Collection %s absente : %s", name, e)
+        self._candidats = self._open_collection(_CANDIDATS_COLLECTION)
+        self._fiches = self._open_collection(_FICHES_COLLECTION)
+        _log.info("Mémoire RAG vidée.")
 
     def compter(self) -> int:
         """Retourne le nombre total de candidats en base."""

@@ -39,8 +39,12 @@ BARÈME DE SCORING (applique-le strictement) :
 
 RÈGLES IMPORTANTES :
 - Les compétences REQUISES (hard skills listés en premier) ont un poids double par rapport aux souhaitées
-- Le niveau attendu est contraignant : pénalise fortement les profils trop expérimentés ou pas assez expérimentés par rapport à niveau_experience, experience_min et experience_max
+- Le niveau attendu compte : pénalise fortement un écart net (étudiant pour un poste senior, senior de 10 ans pour un poste junior) et modérément un écart de quelques années
 - Un candidat qui maîtrise 70% des hard skills requis avec la bonne expérience ne doit PAS scorer sous 60
+- Un profil public (LinkedIn, GitHub, portfolio) est un résumé incomplet : une compétence non mentionnée est INCONNUE, pas absente. Pénalise peu ce qui est seulement non mentionné, fortement ce qui est contredit
+- Les outils communs du métier (Git, ligne de commande, méthodes agiles) sont présumés chez un développeur en poste : leur absence ne fait pas baisser le score
+- Juge d'abord le cœur du poste (langage et framework principaux, métier, localisation) ; les compétences secondaires départagent
+- Le type de contrat n'est pas éliminatoire : un freelance peut accepter un CDI, ajuste de quelques points au plus
 - Si le profil brut ne correspond clairement pas à une personne candidate (page web, article, liste de repos GitHub), donne un score < 20
 - Évalue le POTENTIEL : une expérience connexe solide compense des lacunes sur des outils spécifiques
 
